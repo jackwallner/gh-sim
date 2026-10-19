@@ -26,6 +26,12 @@ print(rts[-1]["identifier"] if rts else "")' "$DEVICE"
 is_duo() { case $DEVICE in *Duo*) return 0 ;; esac; return 1; }
 duo_setup() {
   clang -fobjc-arc -framework Foundation -o "$W/duo-hinge" "$W/tool/duo-hinge.m" || fail boot-failed "cannot build duo-hinge"
+  duo_ports
+  setenv POSE outer
+}
+
+# Display port ids change on every boot, so this runs again once the device is up.
+duo_ports() {
   local ports
   # `simctl io enumerate` keeps streaming and never exits on its own, so read it for a few seconds.
   xcrun simctl io "$UDID" enumerate > "$OUT/displays.txt" 2>&1 &
@@ -34,9 +40,41 @@ duo_setup() {
   kill $pid 2> /dev/null; wait $pid 2> /dev/null
   ports=$(awk '/UUID:/{u=$2} /Default width:/{print $3, u}' "$OUT/displays.txt")
   [ -n "$ports" ] || fail boot-failed "no Duo displays in simctl io enumerate"
-  setenv DUO_INNER "$(echo "$ports" | awk '$1 == 2007 {print $2}')"
-  setenv DUO_OUTER "$(echo "$ports" | awk '$1 == 1398 {print $2}')"
-  setenv POSE outer
+  # Exported here for this step, and through GITHUB_ENV for the later ones.
+  DUO_INNER=$(echo "$ports" | awk '$1 == 2007 {print $2}')
+  DUO_OUTER=$(echo "$ports" | awk '$1 == 1398 {print $2}')
+  export DUO_INNER DUO_OUTER
+  setenv DUO_INNER "$DUO_INNER"
+  setenv DUO_OUTER "$DUO_OUTER"
+}
+
+# True when a screenshot is a single flat colour (the inner display before it draws).
+blank_png() {
+  python3 - "$1" << 'PY'
+import sys
+raw = open(sys.argv[1], "rb").read()
+# Cheap check without PIL: a flat frame is about 100 KB at 2853x2007, a drawn one over 1 MB.
+sys.exit(0 if len(raw) < 250000 else 1)
+PY
+}
+
+# Unfold, then relaunch so the app's scene comes up on the inner display: launched
+# folded, it left the inner display black on the runner.
+duo_unfold() {
+  local bid=$1 i
+  DEVELOPER_DIR=$(xcode-select -p) "$W/duo-hinge" -d "$UDID" flat || fail launch-failed "duo-hinge could not unfold"
+  sleep 3
+  duo_ports
+  xcrun simctl terminate "$UDID" "$bid" > /dev/null 2>&1
+  # shellcheck disable=SC2086
+  xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS > /dev/null || fail launch-failed "relaunch $bid unfolded"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    sleep 5
+    xcrun simctl io "$UDID" screenshot --display="$DUO_INNER" "$OUT/inner-probe.png" > /dev/null 2>&1 || continue
+    blank_png "$OUT/inner-probe.png" || { rm -f "$OUT/inner-probe.png"; note "unfolded, inner display drawing after $((i * 5))s"; return; }
+  done
+  rm -f "$OUT/inner-probe.png"
+  note "WARNING: unfolded but the inner display stayed blank for 60s"
 }
 
 do_pick() {
@@ -184,6 +222,7 @@ do_launch() {
   exe=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")
   xcrun simctl bootstatus "$UDID" -b > /dev/null
   note "booted in $((SECONDS - t))s"
+  is_duo && duo_ports
   xcrun simctl install "$UDID" "$app" || fail launch-failed "install"
   echo "gh-sim: installed at $((SECONDS - t))s"
   xcrun simctl ui "$UDID" appearance "$APPEARANCE"
@@ -199,8 +238,8 @@ do_launch() {
   shoot_all
   # iPhone Duo: the pass above is folded (outer display); unfold and shoot it all again.
   if is_duo; then
-    DEVELOPER_DIR=$(xcode-select -p) "$W/duo-hinge" -d "$UDID" flat || fail launch-failed "duo-hinge could not unfold"
-    POSE=inner; note "unfolded"
+    duo_unfold "$bid"
+    POSE=inner
     shoot_all
   fi
   xcrun simctl spawn "$UDID" log show --last 10m --style compact \
