@@ -164,10 +164,13 @@ do_launch() {
   exe=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")
   xcrun simctl bootstatus "$UDID" -b > /dev/null
   note "booted in $((SECONDS - t))s"
+  xcrun simctl install "$UDID" "$app" || fail launch-failed "install"
+  echo "gh-sim: installed at $((SECONDS - t))s"
   xcrun simctl ui "$UDID" appearance "$APPEARANCE"
+  echo "gh-sim: appearance set at $((SECONDS - t))s"
   xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 \
     --cellularBars 4 --wifiBars 3 > /dev/null 2>&1
-  xcrun simctl install "$UDID" "$app" || fail launch-failed "install"
+  echo "gh-sim: status bar set at $((SECONDS - t))s"
   local kv
   for kv in $APP_ENV; do export "SIMCTL_CHILD_$kv"; done
   # shellcheck disable=SC2086
