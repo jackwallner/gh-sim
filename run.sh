@@ -38,14 +38,18 @@ for d in json.load(sys.stdin)["devices"].get(sys.argv[1], []):
 # Sets PROJ_FLAG/PROJ/SCHEME for xcodebuild from the app folder.
 locate() {
   cd "$W/app/$PROJECT_DIR" || fail build-failed "no folder $PROJECT_DIR in the repo"
-  if [ -f project.yml ]; then
+  if [ -f project.yml ] && [ -z "${GENERATED:-}" ]; then
     command -v xcodegen > /dev/null || HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install -q xcodegen > /dev/null
+    local t=$SECONDS
     xcodegen generate --quiet || fail build-failed "xcodegen generate"
+    note "xcodegen ready in $((SECONDS - t))s"; setenv GENERATED 1
   fi
   local ws; ws=$(ls -d *.xcworkspace 2> /dev/null | head -1)
   PROJ=$(ls -d *.xcodeproj 2> /dev/null | head -1)
   if [ -n "$ws" ]; then PROJ_FLAG=-workspace PROJ=$ws; else PROJ_FLAG=-project; fi
   [ -n "$PROJ" ] || fail build-failed "no .xcodeproj or .xcworkspace in $PROJECT_DIR"
+  # A shared scheme named like the project avoids `-list`, which resolves packages first.
+  [ -n "$SCHEME" ] || [ ! -f "$PROJ/xcshareddata/xcschemes/${PROJ%.*}.xcscheme" ] || SCHEME=${PROJ%.*}
   if [ -z "$SCHEME" ]; then
     SCHEME=$(xcodebuild $PROJ_FLAG "$PROJ" -list -json 2> /dev/null | python3 -c '
 import json, sys
