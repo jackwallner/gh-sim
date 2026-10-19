@@ -27,7 +27,13 @@ is_duo() { case $DEVICE in *Duo*) return 0 ;; esac; return 1; }
 duo_setup() {
   clang -fobjc-arc -framework Foundation -o "$W/duo-hinge" "$W/tool/duo-hinge.m" || fail boot-failed "cannot build duo-hinge"
   local ports
-  ports=$(xcrun simctl io "$UDID" enumerate | awk '/UUID:/{u=$2} /Default width:/{print $3, u}')
+  # `simctl io enumerate` keeps streaming and never exits on its own, so read it for a few seconds.
+  xcrun simctl io "$UDID" enumerate > "$OUT/displays.txt" 2>&1 &
+  local pid=$! i
+  for i in 1 2 3 4 5 6 7 8 9 10; do grep -q 'Default width: 1398' "$OUT/displays.txt" && grep -q 'Default width: 2007' "$OUT/displays.txt" && break; sleep 1; done
+  kill $pid 2> /dev/null; wait $pid 2> /dev/null
+  ports=$(awk '/UUID:/{u=$2} /Default width:/{print $3, u}' "$OUT/displays.txt")
+  [ -n "$ports" ] || fail boot-failed "no Duo displays in simctl io enumerate"
   setenv DUO_INNER "$(echo "$ports" | awk '$1 == 2007 {print $2}')"
   setenv DUO_OUTER "$(echo "$ports" | awk '$1 == 1398 {print $2}')"
   setenv POSE outer
