@@ -33,7 +33,7 @@ duo_setup() {
   setenv POSE outer
 }
 
-do_boot() {
+do_pick() {
   sudo xcode-select -s "/Applications/Xcode_$XCODE.app" || fail "no Xcode $XCODE on the runner"
   local rt sdk
   rt=$(newest_runtime)
@@ -56,12 +56,10 @@ for d in json.load(sys.stdin)["devices"].get(sys.argv[1], []):
         print(d["udid"]); break' "$rt" "$DEVICE")
   [ -n "$UDID" ] || UDID=$(xcrun simctl create gh-sim "$DEVICE" "$rt") ||
     fail boot-failed "no $DEVICE on $rt (runner devices: $(xcrun simctl list devicetypes | grep -o 'iPhone [^(]*' | tr '\n' ',' ))"
-  # Finish booting before the build: on a 3-core runner a booting simulator
-  # starves everything else, and booting during the build made both slower.
-  local t=$SECONDS
-  xcrun simctl bootstatus "$UDID" -b > /dev/null
+  # Not booted yet: on a 3-core runner a booted simulator slows checkout and the
+  # build severalfold, so launch boots it after the build and test lets
+  # xcodebuild boot it.
   setenv UDID "$UDID"
-  note "booted in $((SECONDS - t))s"
   is_duo && duo_setup
   note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), $DEVICE on ${rt##*.}, runner $(sysctl -n hw.ncpu) cores"
 }
@@ -165,6 +163,7 @@ do_launch() {
   bid=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")
   exe=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")
   xcrun simctl bootstatus "$UDID" -b > /dev/null
+  note "booted in $((SECONDS - t))s"
   xcrun simctl ui "$UDID" appearance "$APPEARANCE"
   xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 \
     --cellularBars 4 --wifiBars 3 > /dev/null 2>&1
@@ -173,7 +172,7 @@ do_launch() {
   for kv in $APP_ENV; do export "SIMCTL_CHILD_$kv"; done
   # shellcheck disable=SC2086
   xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS || fail launch-failed "launch $bid"
-  note "launched $bid after $((SECONDS - t))s"
+  note "launched $bid $((SECONDS - t))s after the build"
   shoot_all
   # iPhone Duo: the pass above is folded (outer display); unfold and shoot it all again.
   if is_duo; then

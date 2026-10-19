@@ -48,8 +48,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with: { path: tool }
-      - name: Boot simulator
-        run: tool/run.sh boot
+      - name: Pick simulator
+        run: tool/run.sh pick
       - uses: actions/checkout@v5
         with:
           repository: ${{ inputs.repo }}
