@@ -11,13 +11,43 @@ note() { echo "gh-sim: $*"; echo "$*" >> "$OUT/summary.txt"; }
 fail() { note "FAILED: $*"; echo "$1" > "$OUT/status"; exit 1; }
 setenv() { echo "$1=$2" >> "$GITHUB_ENV"; }
 
+# Newest available iOS runtime that supports $DEVICE, or nothing.
+newest_runtime() {
+  xcrun simctl list runtimes -j | python3 -c '
+import json, sys
+want = sys.argv[1]
+rts = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]
+       and any(t["name"] == want for t in r.get("supportedDeviceTypes", []))]
+print(rts[-1]["identifier"] if rts else "")' "$DEVICE"
+}
+
+# iPhone Duo boots folded (inner display black). duo-hinge sends the fold slider's
+# HID hinge event; the display ports are found by size because their ids change.
+is_duo() { case $DEVICE in *Duo*) return 0 ;; esac; return 1; }
+duo_setup() {
+  clang -fobjc-arc -framework Foundation -o "$W/duo-hinge" "$W/tool/duo-hinge.m" || fail boot-failed "cannot build duo-hinge"
+  local ports
+  ports=$(xcrun simctl io "$UDID" enumerate | awk '/UUID:/{u=$2} /Default width:/{print $3, u}')
+  setenv DUO_INNER "$(echo "$ports" | awk '$1 == 2007 {print $2}')"
+  setenv DUO_OUTER "$(echo "$ports" | awk '$1 == 1398 {print $2}')"
+  setenv POSE outer
+}
+
 do_boot() {
   sudo xcode-select -s "/Applications/Xcode_$XCODE.app" || fail "no Xcode $XCODE on the runner"
-  local rt
-  rt=$(xcrun simctl list runtimes -j | python3 -c '
-import json, sys
-rts = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]]
-print(rts[-1]["identifier"])')
+  local rt sdk
+  rt=$(newest_runtime)
+  # A device the image's runtimes cannot run (iPhone Duo needs iOS 27.1) gets the
+  # runtime matching the Xcode SDK, about 3 minutes.
+  if [ -z "$rt" ]; then
+    sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)
+    local t=$SECONDS
+    xcodebuild -downloadPlatform iOS -buildVersion "$sdk" > "$OUT/runtime-download.log" 2>&1 ||
+      fail boot-failed "no runtime for $DEVICE, and downloading iOS $sdk failed"
+    note "downloaded iOS $sdk runtime for $DEVICE in $((SECONDS - t))s"
+    rt=$(newest_runtime)
+    [ -n "$rt" ] || fail boot-failed "iOS $sdk runtime does not support $DEVICE"
+  fi
   # The image's own devices boot faster than a new one (no first-boot data migration).
   UDID=$(xcrun simctl list devices -j | python3 -c '
 import json, sys
@@ -32,6 +62,7 @@ for d in json.load(sys.stdin)["devices"].get(sys.argv[1], []):
   xcrun simctl bootstatus "$UDID" -b > /dev/null
   setenv UDID "$UDID"
   note "booted in $((SECONDS - t))s"
+  is_duo && duo_setup
   note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), $DEVICE on ${rt##*.}, runner $(sysctl -n hw.ncpu) cores"
 }
 
@@ -107,7 +138,24 @@ EOF
 
 shot() {
   sleep "$WAIT"
+  if is_duo; then
+    local id; [ "$POSE" = inner ] && id=$DUO_INNER || id=$DUO_OUTER
+    xcrun simctl io "$UDID" screenshot --display="$id" "$OUT/shots/$1-$POSE.png" > /dev/null 2>&1 &&
+      note "screenshot shots/$1-$POSE.png ($(sips -g pixelWidth -g pixelHeight "$OUT/shots/$1-$POSE.png" | awk '/pixel/{printf "%s ", $2}'| sed 's/ $//; s/ /x/'))"
+    return
+  fi
   xcrun simctl io "$UDID" screenshot "$OUT/shots/$1.png" > /dev/null 2>&1 && note "screenshot shots/$1.png"
+}
+
+# Opens each --url and screenshots it, after the launch screen.
+shoot_all() {
+  shot launch
+  local i=0 u
+  for u in $URLS; do
+    i=$((i + 1))
+    xcrun simctl openurl "$UDID" "$u" || note "openurl failed: $u"
+    shot "url$i-$(echo "$u" | tr -c 'A-Za-z0-9' '-' | cut -c1-40)"
+  done
 }
 
 do_launch() {
@@ -126,13 +174,13 @@ do_launch() {
   # shellcheck disable=SC2086
   xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS || fail launch-failed "launch $bid"
   note "launched $bid after $((SECONDS - t))s"
-  shot launch
-  local i=0 u
-  for u in $URLS; do
-    i=$((i + 1))
-    xcrun simctl openurl "$UDID" "$u" || note "openurl failed: $u"
-    shot "url$i-$(echo "$u" | tr -c 'A-Za-z0-9' '-' | cut -c1-40)"
-  done
+  shoot_all
+  # iPhone Duo: the pass above is folded (outer display); unfold and shoot it all again.
+  if is_duo; then
+    DEVELOPER_DIR=$(xcode-select -p) "$W/duo-hinge" -d "$UDID" flat || fail launch-failed "duo-hinge could not unfold"
+    POSE=inner; note "unfolded"
+    shoot_all
+  fi
   xcrun simctl spawn "$UDID" log show --last 10m --style compact \
     --predicate "process == \"$exe\"" > "$OUT/app.log" 2> /dev/null
   if xcrun simctl spawn "$UDID" launchctl list 2> /dev/null | grep -q "$bid"; then
