@@ -18,10 +18,20 @@ do_boot() {
 import json, sys
 rts = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]]
 print(rts[-1]["identifier"])')
-  UDID=$(xcrun simctl create gh-sim "$DEVICE" "$rt") || fail boot-failed "cannot create $DEVICE on $rt"
-  # Boot now so first-boot setup runs while the app compiles.
-  xcrun simctl boot "$UDID"
+  # The image's own devices boot faster than a new one (no first-boot data migration).
+  UDID=$(xcrun simctl list devices -j | python3 -c '
+import json, sys
+for d in json.load(sys.stdin)["devices"].get(sys.argv[1], []):
+    if d["name"] == sys.argv[2] and d["isAvailable"]:
+        print(d["udid"]); break' "$rt" "$DEVICE")
+  [ -n "$UDID" ] || UDID=$(xcrun simctl create gh-sim "$DEVICE" "$rt") ||
+    fail boot-failed "no $DEVICE on $rt (runner devices: $(xcrun simctl list devicetypes | grep -o 'iPhone [^(]*' | tr '\n' ',' ))"
+  # Finish booting before the build: on a 3-core runner a booting simulator
+  # starves everything else, and booting during the build made both slower.
+  local t=$SECONDS
+  xcrun simctl bootstatus "$UDID" -b > /dev/null
   setenv UDID "$UDID"
+  note "booted in $((SECONDS - t))s"
   note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), $DEVICE on ${rt##*.}, runner $(sysctl -n hw.ncpu) cores"
 }
 
@@ -29,7 +39,7 @@ print(rts[-1]["identifier"])')
 locate() {
   cd "$W/app/$PROJECT_DIR" || fail build-failed "no folder $PROJECT_DIR in the repo"
   if [ -f project.yml ]; then
-    command -v xcodegen > /dev/null || brew install -q xcodegen > /dev/null
+    command -v xcodegen > /dev/null || HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install -q xcodegen > /dev/null
     xcodegen generate --quiet || fail build-failed "xcodegen generate"
   fi
   local ws; ws=$(ls -d *.xcworkspace 2> /dev/null | head -1)
