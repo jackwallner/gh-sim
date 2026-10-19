@@ -96,7 +96,20 @@ print(want if want in d["schemes"] else d["schemes"][0])' "${PROJ%.*}")
 
 xb() {
   xcodebuild $PROJ_FLAG "$PROJ" -scheme "$SCHEME" -destination "id=$UDID" -derivedDataPath "$DD" \
-    CODE_SIGNING_ALLOWED=NO COMPILATION_CACHE_ENABLE_CACHING=YES "$@"
+    CODE_SIGNING_ALLOWED=NO COMPILATION_CACHE_ENABLE_CACHING=YES $XCODE_ARGS "$@"
+}
+
+# The built apps only (no intermediates or package modules), for a caller that
+# installs the build itself: products.zip holds <Config>-iphonesimulator/<App>.app.
+zip_products() {
+  local st=$W/products app
+  rm -rf "$st"
+  for app in "$DD"/Build/Products/*-iphonesimulator/*.app; do
+    [ -d "$app" ] || continue
+    mkdir -p "$st/$(basename "$(dirname "$app")")"
+    cp -R "$app" "$st/$(basename "$(dirname "$app")")/"
+  done
+  [ -d "$st" ] && ditto -c -k "$st" "$OUT/products.zip" && note "products.zip: $(cd "$st" && ls -d */*.app | tr '\n' ' ')"
 }
 
 do_build() {
@@ -112,6 +125,7 @@ do_build() {
     fail build-failed "build of $SCHEME ($((SECONDS - t))s)"
   fi
   note "built $SCHEME in $((SECONDS - t))s"
+  [ "${PRODUCTS:-false}" != true ] || zip_products
   echo ok > "$OUT/status"
 }
 

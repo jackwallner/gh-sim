@@ -25,6 +25,8 @@ on:
       app_env: { description: space-separated KEY=VALUE pairs for the app's environment, default: "" }
       appearance: { description: light | dark, default: light }
       xcode: { description: Xcode version folder suffix, default: "27.1" }
+      xcode_args: { description: extra xcodebuild args for build and test, space-separated, default: "" }
+      products: { description: "true: zip the built .app bundles into products.zip", default: "false" }
 
 permissions:
   contents: read
@@ -45,6 +47,8 @@ jobs:
       APP_ENV: ${{ inputs.app_env }}
       APPEARANCE: ${{ inputs.appearance }}
       XCODE: ${{ inputs.xcode }}
+      XCODE_ARGS: ${{ inputs.xcode_args }}
+      PRODUCTS: ${{ inputs.products }}
     steps:
       - uses: actions/checkout@v5
         with: { path: tool }
