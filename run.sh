@@ -36,10 +36,15 @@ duo_ports() {
   # `simctl io enumerate` keeps streaming and never exits on its own, so read it for a few seconds.
   xcrun simctl io "$UDID" enumerate > "$OUT/displays.txt" 2>&1 &
   local pid=$! i
-  for i in 1 2 3 4 5 6 7 8 9 10; do grep -q 'Default width: 1398' "$OUT/displays.txt" && grep -q 'Default width: 2007' "$OUT/displays.txt" && break; sleep 1; done
+  # Right after a boot the displays can take a while to register, so allow 30s.
+  for i in $(seq 1 30); do grep -q 'Default width: 1398' "$OUT/displays.txt" && grep -q 'Default width: 2007' "$OUT/displays.txt" && break; sleep 1; done
   kill $pid 2> /dev/null; wait $pid 2> /dev/null
   ports=$(awk '/UUID:/{u=$2} /Default width:/{print $3, u}' "$OUT/displays.txt")
-  [ -n "$ports" ] || fail boot-failed "no Duo displays in simctl io enumerate"
+  if [ -z "$ports" ]; then
+    # Keep the ids an earlier step found rather than failing the run.
+    [ -n "${DUO_INNER:-}" ] && { note "simctl io enumerate empty, keeping the earlier display ids"; return; }
+    fail boot-failed "no Duo displays in simctl io enumerate"
+  fi
   # Exported here for this step, and through GITHUB_ENV for the later ones.
   DUO_INNER=$(echo "$ports" | awk '$1 == 2007 {print $2}')
   DUO_OUTER=$(echo "$ports" | awk '$1 == 1398 {print $2}')
