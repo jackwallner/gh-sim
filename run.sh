@@ -1,0 +1,132 @@
+#!/bin/bash
+# One phase of a gh-sim run on the GitHub runner: boot | build | test | launch.
+# The app is checked out in ./app, DerivedData lives in ./dd, and everything the
+# caller gets back goes in ./out (summary.txt, status, logs, screenshots, test
+# results). Inputs arrive as environment variables from sim.yml.
+set -uo pipefail
+W=$GITHUB_WORKSPACE OUT=$GITHUB_WORKSPACE/out DD=$GITHUB_WORKSPACE/dd
+mkdir -p "$OUT/shots"
+
+note() { echo "gh-sim: $*"; echo "$*" >> "$OUT/summary.txt"; }
+fail() { note "FAILED: $*"; echo "$1" > "$OUT/status"; exit 1; }
+setenv() { echo "$1=$2" >> "$GITHUB_ENV"; }
+
+do_boot() {
+  sudo xcode-select -s "/Applications/Xcode_$XCODE.app" || fail "no Xcode $XCODE on the runner"
+  local rt
+  rt=$(xcrun simctl list runtimes -j | python3 -c '
+import json, sys
+rts = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]]
+print(rts[-1]["identifier"])')
+  UDID=$(xcrun simctl create gh-sim "$DEVICE" "$rt") || fail boot-failed "cannot create $DEVICE on $rt"
+  # Boot now so first-boot setup runs while the app compiles.
+  xcrun simctl boot "$UDID"
+  setenv UDID "$UDID"
+  note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), $DEVICE on ${rt##*.}, runner $(sysctl -n hw.ncpu) cores"
+}
+
+# Sets PROJ_FLAG/PROJ/SCHEME for xcodebuild from the app folder.
+locate() {
+  cd "$W/app/$PROJECT_DIR" || fail build-failed "no folder $PROJECT_DIR in the repo"
+  if [ -f project.yml ]; then
+    command -v xcodegen > /dev/null || brew install -q xcodegen > /dev/null
+    xcodegen generate --quiet || fail build-failed "xcodegen generate"
+  fi
+  local ws; ws=$(ls -d *.xcworkspace 2> /dev/null | head -1)
+  PROJ=$(ls -d *.xcodeproj 2> /dev/null | head -1)
+  if [ -n "$ws" ]; then PROJ_FLAG=-workspace PROJ=$ws; else PROJ_FLAG=-project; fi
+  [ -n "$PROJ" ] || fail build-failed "no .xcodeproj or .xcworkspace in $PROJECT_DIR"
+  if [ -z "$SCHEME" ]; then
+    SCHEME=$(xcodebuild $PROJ_FLAG "$PROJ" -list -json 2> /dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin); d = d.get("project") or d.get("workspace")
+want = sys.argv[1]
+print(want if want in d["schemes"] else d["schemes"][0])' "${PROJ%.*}")
+  fi
+}
+
+xb() {
+  xcodebuild $PROJ_FLAG "$PROJ" -scheme "$SCHEME" -destination "id=$UDID" -derivedDataPath "$DD" \
+    CODE_SIGNING_ALLOWED=NO COMPILATION_CACHE_ENABLE_CACHING=YES "$@"
+}
+
+do_build() {
+  locate
+  setenv SCHEME "$SCHEME"
+  local t=$SECONDS
+  xb build > "$OUT/build.log" 2>&1
+  local rc=$?
+  grep -E '(error|fatal error):' "$OUT/build.log" | sort -u | head -40 > "$OUT/build-errors.txt"
+  if [ $rc -ne 0 ]; then
+    tail -40 "$OUT/build.log"
+    note "build errors:"; cat "$OUT/build-errors.txt" >> "$OUT/summary.txt"
+    fail build-failed "build of $SCHEME ($((SECONDS - t))s)"
+  fi
+  note "built $SCHEME in $((SECONDS - t))s"
+  echo ok > "$OUT/status"
+}
+
+do_test() {
+  locate
+  local t=$SECONDS r=$OUT/tests.xcresult
+  # shellcheck disable=SC2086
+  xb -parallel-testing-enabled NO -resultBundlePath "$r" $TEST_ARGS test > "$OUT/test.log" 2>&1
+  local rc=$?
+  xcrun xcresulttool get test-results summary --path "$r" > "$OUT/test-summary.json" 2> /dev/null
+  xcrun xcresulttool export attachments --path "$r" --output-path "$OUT/attachments" > /dev/null 2>&1
+  python3 - "$OUT/test-summary.json" >> "$OUT/summary.txt" <<'EOF'
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    print("no test results (see test.log)"); raise SystemExit
+print(f"tests: {s.get('result')}, {s.get('passedTests', 0)} passed, {s.get('failedTests', 0)} failed, {s.get('skippedTests', 0)} skipped")
+for f in s.get("testFailures", [])[:30]:
+    print(f"  FAIL {f.get('testIdentifierString') or f.get('testName')}: {f.get('failureText', '')[:300]}")
+EOF
+  tail -30 "$OUT/summary.txt"
+  # The bundle is for Macs only; summary.txt, test-summary.json and attachments cover the rest.
+  (cd "$OUT" && zip -qry tests.xcresult.zip tests.xcresult && rm -rf tests.xcresult)
+  [ $rc -eq 0 ] || fail test-failed "tests ($((SECONDS - t))s)"
+  note "tests passed in $((SECONDS - t))s"
+}
+
+shot() {
+  sleep "$WAIT"
+  xcrun simctl io "$UDID" screenshot "$OUT/shots/$1.png" > /dev/null 2>&1 && note "screenshot shots/$1.png"
+}
+
+do_launch() {
+  local app bid exe t=$SECONDS
+  app=$(ls -d "$DD"/Build/Products/*-iphonesimulator/*.app 2> /dev/null | grep -v -e Tests -e UITests | head -1)
+  [ -n "$app" ] || fail launch-failed "no built .app"
+  bid=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")
+  exe=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")
+  xcrun simctl bootstatus "$UDID" -b > /dev/null
+  xcrun simctl ui "$UDID" appearance "$APPEARANCE"
+  xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 \
+    --cellularBars 4 --wifiBars 3 > /dev/null 2>&1
+  xcrun simctl install "$UDID" "$app" || fail launch-failed "install"
+  local kv
+  for kv in $APP_ENV; do export "SIMCTL_CHILD_$kv"; done
+  # shellcheck disable=SC2086
+  xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS || fail launch-failed "launch $bid"
+  note "launched $bid after $((SECONDS - t))s"
+  shot launch
+  local i=0 u
+  for u in $URLS; do
+    i=$((i + 1))
+    xcrun simctl openurl "$UDID" "$u" || note "openurl failed: $u"
+    shot "url$i-$(echo "$u" | tr -c 'A-Za-z0-9' '-' | cut -c1-40)"
+  done
+  xcrun simctl spawn "$UDID" log show --last 10m --style compact \
+    --predicate "process == \"$exe\"" > "$OUT/app.log" 2> /dev/null
+  if xcrun simctl spawn "$UDID" launchctl list 2> /dev/null | grep -q "$bid"; then
+    note "app still running at the end"
+  else
+    note "WARNING: app is not running at the end (crash?), see app.log"
+    echo crashed > "$OUT/status"; exit 1
+  fi
+}
+
+"do_$1"

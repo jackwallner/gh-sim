@@ -1,0 +1,88 @@
+name: sim
+run-name: ${{ inputs.id }}
+
+# Builds, tests or launches one of Jack's public iOS app repos on a GitHub-hosted
+# Mac with an iOS simulator, so neither the MacBook Air nor the Intel fleet
+# machines have to. Started by ~/bin/gh-sim, which pushes a snapshot of the
+# working tree to refs/gh-sim/<id> in the app repo and downloads the `result`
+# artifact. Everything here is public (logs and artifacts of a public repo), so
+# never pass secrets in the inputs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      id: { description: run id, required: true }
+      repo: { description: owner/name of the app repo, required: true }
+      sha: { description: commit to build, required: true }
+      mode: { description: build | test | launch, required: true, default: launch }
+      project_dir: { description: folder with project.yml or the .xcodeproj, default: . }
+      scheme: { description: scheme (default the one named like the project), default: "" }
+      test_args: { description: extra xcodebuild args for test, e.g. -only-testing:FooTests, default: "" }
+      device: { description: simulator device type, default: iPhone 17 }
+      urls: { description: space-separated deep links, one screenshot each, default: "" }
+      wait: { description: seconds to wait before each screenshot, default: "8" }
+      launch_args: { description: arguments passed to the app at launch, default: "" }
+      app_env: { description: space-separated KEY=VALUE pairs for the app's environment, default: "" }
+      appearance: { description: light | dark, default: light }
+      xcode: { description: Xcode version folder suffix, default: "27.1" }
+
+permissions:
+  contents: read
+
+jobs:
+  sim:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      MODE: ${{ inputs.mode }}
+      PROJECT_DIR: ${{ inputs.project_dir }}
+      SCHEME: ${{ inputs.scheme }}
+      TEST_ARGS: ${{ inputs.test_args }}
+      DEVICE: ${{ inputs.device }}
+      URLS: ${{ inputs.urls }}
+      WAIT: ${{ inputs.wait }}
+      LAUNCH_ARGS: ${{ inputs.launch_args }}
+      APP_ENV: ${{ inputs.app_env }}
+      APPEARANCE: ${{ inputs.appearance }}
+      XCODE: ${{ inputs.xcode }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: tool }
+      - name: Boot simulator
+        run: tool/run.sh boot
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          path: app
+          persist-credentials: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            dd/SourcePackages
+            dd/CompilationCache.noindex
+          key: v1-${{ inputs.repo }}-${{ github.run_id }}
+          restore-keys: v1-${{ inputs.repo }}-
+      - name: Build
+        run: tool/run.sh build
+      - name: Test
+        if: inputs.mode == 'test'
+        run: tool/run.sh test
+      - name: Launch and screenshot
+        if: inputs.mode == 'launch'
+        run: tool/run.sh launch
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            dd/SourcePackages
+            dd/CompilationCache.noindex
+          key: v1-${{ inputs.repo }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result
+          path: out
+          retention-days: 3
