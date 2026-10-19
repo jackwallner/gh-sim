@@ -14,7 +14,7 @@ on:
       id: { description: run id, required: true }
       repo: { description: owner/name of the app repo, required: true }
       sha: { description: commit to build, required: true }
-      mode: { description: build | test | launch, required: true, default: launch }
+      mode: { description: build | test | launch | all (build once, then test and launch), required: true, default: launch }
       project_dir: { description: folder with project.yml or the .xcodeproj, default: . }
       scheme: { description: scheme (default the one named like the project), default: "" }
       test_args: { description: extra xcodebuild args for test, e.g. -only-testing:FooTests, default: "" }
@@ -69,12 +69,14 @@ jobs:
           key: v1-${{ inputs.repo }}-${{ github.run_id }}
           restore-keys: v1-${{ inputs.repo }}-
       - name: Build
+        id: build
         run: tool/run.sh build
       - name: Test
-        if: inputs.mode == 'test'
+        if: inputs.mode == 'test' || inputs.mode == 'all'
         run: tool/run.sh test
+      # In `all`, screenshots still come back when tests fail.
       - name: Launch and screenshot
-        if: inputs.mode == 'launch'
+        if: (inputs.mode == 'launch' && success()) || (inputs.mode == 'all' && !cancelled() && steps.build.outcome == 'success')
         run: tool/run.sh launch
       - uses: actions/cache/save@v4
         if: always()
