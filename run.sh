@@ -240,7 +240,9 @@ start_record() {
   fi
   xcrun simctl io "$UDID" recordVideo "${options[@]}" "$RECORD_PATH" > "$RECORD_PATH.log" 2>&1 &
   RECORD_PID=$!
-  ( sleep "${RECORD_SECONDS:-20}"; kill -INT "$RECORD_PID" 2>/dev/null || true ) &
+  ( sleep "${RECORD_SECONDS:-20}"; kill -INT "$RECORD_PID" 2>/dev/null || true
+    sleep 10; kill -TERM "$RECORD_PID" 2>/dev/null || true
+    sleep 5; kill -KILL "$RECORD_PID" 2>/dev/null || true ) &
   RECORD_WATCHDOG=$!
   note "native recording started: $RECORD_PATH"
 }
@@ -249,6 +251,13 @@ stop_record() {
   [ -n "$RECORD_PID" ] || return 0
   kill "$RECORD_WATCHDOG" 2>/dev/null || true
   kill -INT "$RECORD_PID" 2>/dev/null || true
+  local attempt
+  for attempt in $(seq 1 20); do kill -0 "$RECORD_PID" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$RECORD_PID" 2>/dev/null; then
+    kill -TERM "$RECORD_PID" 2>/dev/null || true
+    sleep 2
+    kill -KILL "$RECORD_PID" 2>/dev/null || true
+  fi
   wait "$RECORD_PID" 2>/dev/null || true
   if command -v ffprobe >/dev/null && command -v ffmpeg >/dev/null; then
     python3 "$W/tool/record60.py" verify --output "$RECORD_PATH" > "$RECORD_PATH.analysis.log" 2>&1 ||
