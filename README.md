@@ -14,4 +14,4 @@ of a public repo runs here instead of waiting (`--xcarg`, `--testarg`,
 `--products`; see `~/ios/simulators/headless-agent-simulators.md`).
 
 The account gets 5 Mac jobs at once, so gh-sim allows one run in flight per
-checkout and 2 per repo; `all` builds once, then tests and launches, in one job.
+agent session and 2 per repo; `all` builds once, then tests and launches, in one job.
