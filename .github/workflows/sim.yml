@@ -105,8 +105,9 @@ jobs:
         if: inputs.mode == 'test' || inputs.mode == 'all'
         run: tool/run.sh test
       # In `all`, screenshots still come back when tests fail.
+      # Duo unfold and native recording need more than a phone's 10 minutes.
       - name: Launch and screenshot
-        timeout-minutes: 10
+        timeout-minutes: ${{ (contains(inputs.device, 'Duo') || inputs.record_seconds != '0') && 25 || 10 }}
         if: (inputs.mode == 'launch' && success()) || (inputs.mode == 'all' && !cancelled() && steps.build.outcome == 'success')
         run: tool/run.sh launch
       - uses: actions/cache/save@v4

@@ -185,6 +185,15 @@ do_test() {
   # shellcheck disable=SC2086
   xb -parallel-testing-enabled NO -resultBundlePath "$r" $TEST_ARGS test > "$OUT/test.log" 2>&1
   local rc=$?
+  if [ $rc -ne 0 ] && grep -q "Timed out while launching application via Xcode" "$OUT/test.log"; then
+    # The runner's simulator sometimes stalls launching the app under test. That is the runner,
+    # not the app, so run the tests once more before reporting a failure.
+    note "simulator stalled launching the app (runner flake), running the tests again"
+    mv "$OUT/test.log" "$OUT/test-first.log"; rm -rf "$r"
+    # shellcheck disable=SC2086
+    xb -parallel-testing-enabled NO -resultBundlePath "$r" $TEST_ARGS test > "$OUT/test.log" 2>&1
+    rc=$?
+  fi
   stop_record
   RECORD_TAG=
   xcrun xcresulttool get test-results summary --path "$r" > "$OUT/test-summary.json" 2> /dev/null
