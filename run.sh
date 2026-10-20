@@ -175,9 +175,18 @@ do_build() {
 do_test() {
   locate
   local t=$SECONDS r=$OUT/tests.xcresult
+  if [ "${RECORD_SECONDS:-0}" -gt 0 ]; then
+    xcrun simctl boot "$UDID" >/dev/null 2>&1 || true
+    xcrun simctl bootstatus "$UDID" -b >/dev/null || fail test-failed "recording device boot"
+    is_duo && duo_ports
+    RECORD_TAG=tests-
+    start_record
+  fi
   # shellcheck disable=SC2086
   xb -parallel-testing-enabled NO -resultBundlePath "$r" $TEST_ARGS test > "$OUT/test.log" 2>&1
   local rc=$?
+  stop_record
+  RECORD_TAG=
   xcrun xcresulttool get test-results summary --path "$r" > "$OUT/test-summary.json" 2> /dev/null
   xcrun xcresulttool export attachments --path "$r" --output-path "$OUT/attachments" > /dev/null 2>&1
   python3 - "$OUT/test-summary.json" >> "$OUT/summary.txt" <<'EOF'
@@ -223,7 +232,7 @@ RECORD_PID= RECORD_WATCHDOG= RECORD_PATH=
 start_record() {
   [ "${RECORD_SECONDS:-0}" -gt 0 ] || return 0
   mkdir -p "$OUT/videos"
-  RECORD_PATH="$OUT/videos/${POSE:-phone}.mp4"
+  RECORD_PATH="$OUT/videos/${RECORD_TAG:-}${POSE:-phone}.mp4"
   local options=(--codec=h264)
   if is_duo; then
     local display; [ "${POSE:-outer}" = inner ] && display=$DUO_INNER || display=$DUO_OUTER

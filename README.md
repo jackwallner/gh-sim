@@ -22,3 +22,5 @@ Videos and available frame-analysis reports land under `videos/` in the result
 artifact. `record60.py verify --output <video>` checks decoded timestamps and
 distinct frame hashes. Requested capture rate alone does not establish native
 60 fps, and the workflow never interpolates or duplicates frames to claim it.
+
+With `--record-seconds`, the test phase also records the selected device. Use a focused XCUITest to capture real gestures; test recordings use a `tests-` prefix.
