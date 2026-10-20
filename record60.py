@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import signal
@@ -27,13 +28,20 @@ def analyze(path: Path, window_start: float = 0, window_end: float | None = None
     median = statistics.median(gaps) if gaps else 0
     stream = data.get("streams", [{}])[0]
     # A timestamp test never proves distinct rendered frames. Hash decoded frames as well.
-    hashes = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0",
+    trim = ["-ss", str(window_start)] if window_start else []
+    if window_end is not None:
+        trim += ["-t", str(window_end-window_start)]
+    hashes = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path)] + trim + ["-map", "0:v:0",
                              "-f", "framemd5", "-"], capture_output=True, text=True, check=True)
     rows = [line for line in hashes.stdout.splitlines() if line and not line.startswith("#")]
     distinct = len({line.split(",")[-1].strip() for line in rows})
-    return {"path": str(path.resolve()), "requested_fps": 60, "measured_fps": fps,
+    return {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "window_start": window_start, "window_end": window_end,
+            "requested_fps": 60, "measured_fps": fps,
             "median_frame_interval": median, "frame_count": len(times), "duration": duration,
-            "distinct_frames_whole_capture": distinct, "stream": stream,
+            "distinct_frames_analyzed_window": distinct, "stream": stream,
+            "p95_frame_interval": sorted(gaps)[min(len(gaps)-1, int(len(gaps)*.95))] if gaps else 0,
+            "intervals_over_25ms": sum(gap > .025 for gap in gaps),
             "cadence_60fps": bool(duration >= 1 and fps >= 54 and median and median <= 1/54),
             "native_60fps_proven": bool(duration >= 1 and fps >= 54 and median and median <= 1/54
                                         and distinct >= min(54, len(times))),
