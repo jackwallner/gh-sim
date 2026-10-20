@@ -219,6 +219,37 @@ shoot_all() {
   done
 }
 
+RECORD_PID= RECORD_WATCHDOG= RECORD_PATH=
+start_record() {
+  [ "${RECORD_SECONDS:-0}" -gt 0 ] || return 0
+  mkdir -p "$OUT/videos"
+  RECORD_PATH="$OUT/videos/${POSE:-phone}.mp4"
+  local options=(--codec=h264)
+  if is_duo; then
+    local display; [ "${POSE:-outer}" = inner ] && display=$DUO_INNER || display=$DUO_OUTER
+    options+=("--display=$display")
+  fi
+  xcrun simctl io "$UDID" recordVideo "${options[@]}" "$RECORD_PATH" > "$RECORD_PATH.log" 2>&1 &
+  RECORD_PID=$!
+  ( sleep "${RECORD_SECONDS:-20}"; kill -INT "$RECORD_PID" 2>/dev/null || true ) &
+  RECORD_WATCHDOG=$!
+  note "native recording started: $RECORD_PATH"
+}
+
+stop_record() {
+  [ -n "$RECORD_PID" ] || return 0
+  kill "$RECORD_WATCHDOG" 2>/dev/null || true
+  kill -INT "$RECORD_PID" 2>/dev/null || true
+  wait "$RECORD_PID" 2>/dev/null || true
+  if command -v ffprobe >/dev/null && command -v ffmpeg >/dev/null; then
+    python3 "$W/tool/record60.py" verify --output "$RECORD_PATH" > "$RECORD_PATH.analysis.log" 2>&1 ||
+      note "recording frame proof needs review: $RECORD_PATH.analysis.log"
+  else
+    note "recording requires frame analysis after download (ffprobe unavailable)"
+  fi
+  RECORD_PID= RECORD_WATCHDOG=
+}
+
 do_launch() {
   local app bid exe t=$SECONDS
   app=$(ls -d "$DD"/Build/Products/*-iphonesimulator/*.app 2> /dev/null | grep -v -e Tests -e UITests | head -1)
@@ -238,14 +269,18 @@ do_launch() {
   local kv
   for kv in $APP_ENV; do export "SIMCTL_CHILD_$kv"; done
   # shellcheck disable=SC2086
+  start_record
   xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS || fail launch-failed "launch $bid"
   note "launched $bid $((SECONDS - t))s after the build"
   shoot_all
+  stop_record
   # iPhone Duo: the pass above is folded (outer display); unfold and shoot it all again.
   if is_duo; then
     duo_unfold "$bid"
     POSE=inner
+    start_record
     shoot_all
+    stop_record
   fi
   xcrun simctl spawn "$UDID" log show --last 10m --style compact \
     --predicate "process == \"$exe\"" > "$OUT/app.log" 2> /dev/null
@@ -257,4 +292,5 @@ do_launch() {
   fi
 }
 
+trap 'stop_record' EXIT
 "do_$1"

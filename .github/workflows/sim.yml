@@ -14,19 +14,48 @@ on:
       id: { description: run id, required: true }
       repo: { description: owner/name of the app repo, required: true }
       sha: { description: commit to build, required: true }
-      mode: { description: build | test | launch | all (build once, then test and launch), required: true, default: launch }
-      project_dir: { description: folder with project.yml or the .xcodeproj, default: . }
-      scheme: { description: scheme (default the one named like the project), default: "" }
-      test_args: { description: extra xcodebuild args for test, e.g. -only-testing:FooTests, default: "" }
+      mode:
+        description: "build | test | launch | all (build once, then test and launch)"
+        required: true
+        default: launch
+      project_dir:
+        { description: folder with project.yml or the .xcodeproj, default: . }
+      scheme:
+        {
+          description: scheme (default the one named like the project),
+          default: "",
+        }
+      test_args:
+        description: "extra xcodebuild args for test, e.g. -only-testing:FooTests"
+        default: ""
       device: { description: simulator device type, default: iPhone 17 }
-      urls: { description: space-separated deep links, one screenshot each, default: "" }
-      wait: { description: seconds to wait before each screenshot, default: "8" }
-      launch_args: { description: arguments passed to the app at launch, default: "" }
-      app_env: { description: space-separated KEY=VALUE pairs for the app's environment, default: "" }
+      urls:
+        description: "space-separated deep links, one screenshot each"
+        default: ""
+      wait:
+        { description: seconds to wait before each screenshot, default: "8" }
+      launch_args:
+        { description: arguments passed to the app at launch, default: "" }
+      app_env:
+        {
+          description: space-separated KEY=VALUE pairs for the app's environment,
+          default: "",
+        }
       appearance: { description: light | dark, default: light }
       xcode: { description: Xcode version folder suffix, default: "27.1" }
-      xcode_args: { description: extra xcodebuild args for build and test, space-separated, default: "" }
-      products: { description: "true: zip the built .app bundles into products.zip", default: "false" }
+      xcode_args:
+        description: "extra xcodebuild args for build and test, space-separated"
+        default: ""
+      products:
+        {
+          description: "true: zip the built .app bundles into products.zip",
+          default: "false",
+        }
+      record_seconds:
+        {
+          description: "Native simulator recording during launch (0 disables, maximum 120 seconds)",
+          default: "0",
+        }
 
 permissions:
   contents: read
@@ -49,6 +78,7 @@ jobs:
       XCODE: ${{ inputs.xcode }}
       XCODE_ARGS: ${{ inputs.xcode_args }}
       PRODUCTS: ${{ inputs.products }}
+      RECORD_SECONDS: ${{ inputs.record_seconds }}
     steps:
       - uses: actions/checkout@v5
         with: { path: tool }

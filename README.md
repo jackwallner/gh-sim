@@ -15,3 +15,10 @@ of a public repo runs here instead of waiting (`--xcarg`, `--testarg`,
 
 The account gets 5 Mac jobs at once, so gh-sim allows one run in flight per
 agent session and 2 per repo; `all` builds once, then tests and launches, in one job.
+
+`gh-sim launch --record-seconds 20` records native simulator video alongside
+the screenshots. Duo launch captures outer and inner displays separately.
+Videos and available frame-analysis reports land under `videos/` in the result
+artifact. `record60.py verify --output <video>` checks decoded timestamps and
+distinct frame hashes. Requested capture rate alone does not establish native
+60 fps, and the workflow never interpolates or duplicates frames to claim it.
