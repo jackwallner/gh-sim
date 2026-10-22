@@ -24,3 +24,13 @@ distinct frame hashes. Requested capture rate alone does not establish native
 60 fps, and the workflow never interpolates or duplicates frames to claim it.
 
 With `--record-seconds`, the test phase also records the selected device. Use a focused XCUITest to capture real gestures; test recordings use a `tests-` prefix.
+
+## TestFlight
+
+`testflight.yml` archives a public app repo and uploads it to TestFlight, so no
+fleet machine needs Xcode 27 or signing keys. `~/ios/release/testflight.sh` runs
+it through `~/bin/gh-testflight` for every public repo (`--local` opts out). The
+App Store Connect key and a dedicated "Created via API" development certificate
+live in the `testflight` environment, which only `main` can use; distribution is
+cloud signed. Gitignored config (`Config/Secrets.xcconfig` and the like) arrives
+as the environment secret `APP_FILES_<REPO>`. Runs for one repo queue one at a time.

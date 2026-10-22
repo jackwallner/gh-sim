@@ -1,0 +1,108 @@
+name: testflight
+run-name: ${{ inputs.id }}
+
+# Archives one of Jack's public iOS app repos on a GitHub-hosted Mac and uploads
+# it to TestFlight, so no fleet machine has to run Xcode 27 or hold signing keys.
+# Started by ~/bin/gh-testflight (called from ~/ios/release/testflight.sh), which
+# pushes a snapshot of the working tree, with the build bump and the release
+# scripts under .gh-testflight/, to refs/gh-testflight/<id> in the app repo.
+#
+# Credentials live in the `testflight` environment, which only main may use:
+# the App Store Connect key (signs and uploads; distribution is cloud signed)
+# and a dedicated "Created via API" development certificate for the archive.
+# Gitignored config such as Config/Secrets.xcconfig arrives as the environment
+# secret APP_FILES_<NAME> (a base64 tar.gz). Logs here are public: never echo
+# a secret, and never pass one as an input.
+
+on:
+  workflow_dispatch:
+    inputs:
+      id: { description: run id, required: true }
+      repo: { description: owner/name of the app repo, required: true }
+      sha: { description: snapshot commit to archive, required: true }
+      project_dir: { description: folder with project.yml, default: . }
+      project: { description: .xcodeproj name, required: true }
+      scheme: { description: scheme, required: true }
+      clean: { description: "true: xcodebuild clean first", default: "false" }
+      post_archive: { description: command run on the archive before upload, default: "" }
+      extra_args: { description: extra archive xcodebuild args, space-separated, default: "" }
+      files_secret: { description: "NAME of the APP_FILES_<NAME> secret, empty for none", default: "" }
+      xcode: { description: Xcode version folder suffix, default: "27.1" }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight-${{ inputs.repo }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: xcode-27
+    environment: testflight
+    timeout-minutes: 90
+    env:
+      APP_DIR: app/${{ inputs.project_dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          path: app
+          persist-credentials: false
+      - name: Xcode and XcodeGen
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_${{ inputs.xcode }}.app"
+          xcodebuild -version | head -1
+          command -v xcodegen > /dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install -q xcodegen > /dev/null
+      - name: Signing keychain and API key
+        env:
+          DEV_P12_B64: ${{ secrets.DEV_P12_B64 }}
+          DEV_P12_PASSWORD: ${{ secrets.DEV_P12_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          kc=$RUNNER_TEMP/signing.keychain-db pw=$(openssl rand -hex 16)
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          printf %s "$DEV_P12_B64" | base64 --decode > "$RUNNER_TEMP/dev.p12"
+          security import "$RUNNER_TEMP/dev.p12" -k "$kc" -P "$DEV_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security > /dev/null
+          rm -f "$RUNNER_TEMP/dev.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc" > /dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$kc" | tail -1
+          umask 077
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/asc.p8"
+      - name: App config files
+        if: inputs.files_secret != ''
+        env:
+          FILES: ${{ secrets[format('APP_FILES_{0}', inputs.files_secret)] }}
+        run: |
+          [ -n "$FILES" ] || { echo "secret APP_FILES_${{ inputs.files_secret }} is missing" >&2; exit 1; }
+          printf %s "$FILES" | base64 --decode | tar -xzf - -C "$APP_DIR"
+      - name: Archive and upload
+        env:
+          GH_TESTFLIGHT_RUNNER: "1"
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          PROJECT: ${{ inputs.project }}
+          SCHEME: ${{ inputs.scheme }}
+          CLEAN: ${{ inputs.clean }}
+          POST_ARCHIVE: ${{ inputs.post_archive }}
+          EXTRA_ARGS: ${{ inputs.extra_args }}
+        run: |
+          mkdir -p ~/ios/release
+          cp app/.gh-testflight/* ~/ios/release/
+          cd "$APP_DIR"
+          args=(--project "$PROJECT" --scheme "$SCHEME" --no-bump)
+          [ "$CLEAN" = true ] && args+=(--clean)
+          [ -n "$POST_ARCHIVE" ] && args+=(--post-archive "$POST_ARCHIVE")
+          read -ra extra <<< "$EXTRA_ARGS"
+          [ ${#extra[@]} -gt 0 ] && args+=(-- "${extra[@]}")
+          ASC_KEY_PATH=$RUNNER_TEMP/asc.p8 bash ~/ios/release/testflight.sh "${args[@]}" ||
+            { tail -60 build/testflight-*.log 2> /dev/null; exit 1; }
+      - name: Remove credentials
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2> /dev/null || true
+          rm -f "$RUNNER_TEMP/asc.p8"
