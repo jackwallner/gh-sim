@@ -301,6 +301,7 @@ do_launch() {
   local app bid exe t=$SECONDS
   app=$(ls -d "$DD"/Build/Products/*-iphonesimulator/*.app 2> /dev/null | grep -v -e Tests -e UITests | head -1)
   [ -n "$app" ] || fail launch-failed "no built .app"
+  touch "$OUT/.launch-start"
   bid=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")
   exe=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")
   xcrun simctl bootstatus "$UDID" -b > /dev/null
@@ -331,12 +332,24 @@ do_launch() {
   fi
   xcrun simctl spawn "$UDID" log show --last 10m --style compact \
     --predicate "process == \"$exe\"" > "$OUT/app.log" 2> /dev/null
-  if xcrun simctl spawn "$UDID" launchctl list 2> /dev/null | grep -q "$bid"; then
-    note "app still running at the end"
-  else
-    note "WARNING: app is not running at the end (crash?), see app.log"
+  app_ended "$bid" "$exe"
+}
+
+# A crash leaves a report on the host. launchctl alone misreported 28 of 160 Duo
+# runs (Total Calories among them) as crashed with no crash anywhere.
+app_ended() {
+  local bid=$1 exe=$2 i report
+  for i in 1 2 3; do
+    xcrun simctl spawn "$UDID" launchctl list 2> /dev/null | grep -q "$bid" && { note "app still running at the end"; return; }
+    sleep 2
+  done
+  report=$(find "$HOME/Library/Logs/DiagnosticReports" -name "$exe*.ips" -newer "$OUT/.launch-start" 2> /dev/null | head -1)
+  if [ -n "$report" ]; then
+    cp "$report" "$OUT/crash.ips"
+    note "CRASHED: $exe left a crash report, see crash.ips and app.log"
     echo crashed > "$OUT/status"; exit 1
   fi
+  note "app not listed by launchctl at the end, and no crash report: not a crash"
 }
 
 trap 'stop_record' EXIT
