@@ -34,6 +34,11 @@ on:
         default: ""
       wait:
         { description: seconds to wait before each screenshot, default: "8" }
+      screens:
+        {
+          description: "|-separated launch arguments, one relaunch and screenshot each",
+          default: "",
+        }
       launch_args:
         { description: arguments passed to the app at launch, default: "" }
       app_env:
@@ -72,6 +77,7 @@ jobs:
       DEVICE: ${{ inputs.device }}
       URLS: ${{ inputs.urls }}
       WAIT: ${{ inputs.wait }}
+      SCREENS: ${{ inputs.screens }}
       LAUNCH_ARGS: ${{ inputs.launch_args }}
       APP_ENV: ${{ inputs.app_env }}
       APPEARANCE: ${{ inputs.appearance }}

@@ -73,13 +73,19 @@ duo_unfold() {
   xcrun simctl terminate "$UDID" "$bid" > /dev/null 2>&1
   # shellcheck disable=SC2086
   xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS > /dev/null || fail launch-failed "relaunch $bid unfolded"
+  inner_drawn unfolded
+}
+
+# Waits until the inner display draws after a launch, up to 60s.
+inner_drawn() {
+  local i
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     sleep 5
     xcrun simctl io "$UDID" screenshot --display="$DUO_INNER" "$OUT/inner-probe.png" > /dev/null 2>&1 || continue
-    blank_png "$OUT/inner-probe.png" || { rm -f "$OUT/inner-probe.png"; note "unfolded, inner display drawing after $((i * 5))s"; return; }
+    blank_png "$OUT/inner-probe.png" || { rm -f "$OUT/inner-probe.png"; note "$1, inner display drawing after $((i * 5))s"; return; }
   done
   rm -f "$OUT/inner-probe.png"
-  note "WARNING: unfolded but the inner display stayed blank for 60s"
+  note "WARNING: $1 but the inner display stayed blank for 60s"
 }
 
 do_pick() {
@@ -226,14 +232,28 @@ shot() {
   xcrun simctl io "$UDID" screenshot "$OUT/shots/$1.png" > /dev/null 2>&1 && note "screenshot shots/$1.png"
 }
 
-# Opens each --url and screenshots it, after the launch screen.
+# Opens each --url and screenshots it, after the launch screen, then relaunches
+# the app once per --screen with those launch arguments added and screenshots
+# that. iOS 27 puts an "Open in" alert over every custom-scheme openurl, so
+# --screen is how one run captures several clean screens.
 shoot_all() {
+  local bid=$1 i=0 u s screens
   shot launch
-  local i=0 u
   for u in $URLS; do
     i=$((i + 1))
     xcrun simctl openurl "$UDID" "$u" || note "openurl failed: $u"
     shot "url$i-$(echo "$u" | tr -c 'A-Za-z0-9' '-' | cut -c1-40)"
+  done
+  [ -n "${SCREENS:-}" ] || return 0
+  IFS='|' read -ra screens <<< "$SCREENS"
+  i=0
+  for s in "${screens[@]}"; do
+    i=$((i + 1))
+    xcrun simctl terminate "$UDID" "$bid" > /dev/null 2>&1
+    # shellcheck disable=SC2086
+    xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS $s > /dev/null || { note "relaunch failed: $s"; continue; }
+    [ "${POSE:-}" = inner ] && inner_drawn "screen $i"
+    shot "screen$i-$(echo "$s" | tr -c 'A-Za-z0-9' '-' | sed 's/^-*//' | cut -c1-40)"
   done
 }
 
@@ -299,14 +319,14 @@ do_launch() {
   start_record
   xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS || fail launch-failed "launch $bid"
   note "launched $bid $((SECONDS - t))s after the build"
-  shoot_all
+  shoot_all "$bid"
   stop_record
   # iPhone Duo: the pass above is folded (outer display); unfold and shoot it all again.
   if is_duo; then
     duo_unfold "$bid"
     POSE=inner
     start_record
-    shoot_all
+    shoot_all "$bid"
     stop_record
   fi
   xcrun simctl spawn "$UDID" log show --last 10m --style compact \
