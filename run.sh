@@ -253,7 +253,7 @@ shoot_all() {
     # shellcheck disable=SC2086
     xcrun simctl launch "$UDID" "$bid" $LAUNCH_ARGS $s > /dev/null || { note "relaunch failed: $s"; continue; }
     [ "${POSE:-}" = inner ] && inner_drawn "screen $i"
-    shot "screen$i-$(echo "$s" | tr -c 'A-Za-z0-9' '-' | sed 's/^-*//' | cut -c1-40)"
+    shot "screen$i-$(printf %s "$s" | tr -c 'A-Za-z0-9' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g' | cut -c1-40)"
   done
 }
 
