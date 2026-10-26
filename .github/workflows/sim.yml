@@ -58,7 +58,7 @@ on:
         }
       record_seconds:
         {
-          description: "Native simulator recording during launch (0 disables, maximum 120 seconds)",
+          description: "Native simulator recording during launch (0 disables, maximum 300 seconds)",
           default: "0",
         }
 
