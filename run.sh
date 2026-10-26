@@ -181,9 +181,12 @@ do_build() {
 do_test() {
   locate
   local t=$SECONDS r=$OUT/tests.xcresult
+  # Boot first so test screenshots and recordings get the same clean status bar as launches.
+  xcrun simctl boot "$UDID" >/dev/null 2>&1 || true
+  xcrun simctl bootstatus "$UDID" -b >/dev/null || fail test-failed "device boot"
+  xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 \
+    --cellularBars 4 --wifiBars 3 > /dev/null 2>&1
   if [ "${RECORD_SECONDS:-0}" -gt 0 ]; then
-    xcrun simctl boot "$UDID" >/dev/null 2>&1 || true
-    xcrun simctl bootstatus "$UDID" -b >/dev/null || fail test-failed "recording device boot"
     is_duo && duo_ports
     RECORD_TAG=tests-
     start_record
