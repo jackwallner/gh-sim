@@ -1,5 +1,6 @@
 #!/bin/bash
-# One phase of a gh-sim run on the GitHub runner: boot | build | test | launch.
+# One phase of a gh-sim run on the GitHub runner: boot | build | test | launch
+# (or pick_air first, on the Air's slim pool).
 # The app is checked out in ./app, DerivedData lives in ./dd, and everything the
 # caller gets back goes in ./out (summary.txt, status, logs, screenshots, test
 # results). Inputs arrive as environment variables from sim.yml.
@@ -117,6 +118,12 @@ for d in json.load(sys.stdin)["devices"].get(sys.argv[1], []):
   setenv UDID "$UDID"
   is_duo && duo_setup
   note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), $DEVICE on ${rt##*.}, runner $(sysctl -n hw.ncpu) cores"
+}
+
+# The Air's slim pool (fleet/ai/air-sim-lane.py): the device is already leased and booted as $UDID.
+do_pick_air() {
+  is_duo && duo_setup
+  note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), pool device $UDID on the Air"
 }
 
 # Sets PROJ_FLAG/PROJ/SCHEME for xcodebuild from the app folder.
