@@ -513,7 +513,7 @@ def main_started(udid: str, bundle: str) -> float | None:
 def seconds_to_content(udid: str, bundle: str, home: list[bytes], scratch: Path, limit: float = 20) -> float | None:
     """Seconds from the app's main() to its first drawn frame: the first frame after the blank launch
     screen, or, for a launch screen that is not blank, the first one that holds still off the home screen."""
-    sh(["xcrun", "simctl", "terminate", udid, bundle], check=False)
+    sh(["xcrun", "simctl", "terminate", udid, bundle], check=False, timeout=SIM_CALL_SECONDS)
     data = sh(["xcrun", "simctl", "get_app_container", udid, bundle, "data"], check=False).stdout.strip()
     if data:
         (Path(data) / "tmp" / "qa-launch-mark").unlink(missing_ok=True)
@@ -521,7 +521,7 @@ def seconds_to_content(udid: str, bundle: str, home: list[bytes], scratch: Path,
     mark = launch_mark()
     env = {**os.environ, "SIMCTL_CHILD_DYLD_INSERT_LIBRARIES": str(mark)} if mark else None
     start = time.time()
-    if sh(["xcrun", "simctl", "launch", udid, bundle], check=False, env=env).returncode != 0:
+    if sh(["xcrun", "simctl", "launch", udid, bundle], check=False, env=env, timeout=SIM_CALL_SECONDS).returncode != 0:
         return None
     previous = b""
     seen_blank = False
@@ -552,7 +552,7 @@ def launch_reference(udid: str, bundle: str, home: Path, folder: Path, rounds: i
     alternately on the same simulator, so both carry the same simulator and Mac load."""
     if not CONTROL_APP.is_dir():
         return None
-    sh(["xcrun", "simctl", "install", udid, str(CONTROL_APP)], check=False)
+    sh(["xcrun", "simctl", "install", udid, str(CONTROL_APP)], check=False, timeout=300)
     reference = gray_frames(home)[:1] if home.is_file() else []
     scratch = folder / "launch-probe.png"
     times: dict[str, list[float]] = {"app": [], "reference": []}
@@ -561,8 +561,8 @@ def launch_reference(udid: str, bundle: str, home: Path, folder: Path, rounds: i
             seconds = seconds_to_content(udid, target, reference, scratch)
             if seconds is not None:
                 times[key].append(seconds)
-    sh(["xcrun", "simctl", "terminate", udid, bundle], check=False)
-    sh(["xcrun", "simctl", "terminate", udid, CONTROL_BUNDLE], check=False)
+    sh(["xcrun", "simctl", "terminate", udid, bundle], check=False, timeout=SIM_CALL_SECONDS)
+    sh(["xcrun", "simctl", "terminate", udid, CONTROL_BUNDLE], check=False, timeout=SIM_CALL_SECONDS)
     scratch.unlink(missing_ok=True)
     if not times["app"] or not times["reference"]:
         return None
@@ -909,7 +909,7 @@ def cmd_run(args) -> int:
         folder.mkdir()
         sim.configure(persona)
         if bundle_id:
-            sh(["xcrun", "simctl", "uninstall", sim.udid, bundle_id], check=False, log=log)
+            sh(["xcrun", "simctl", "uninstall", sim.udid, bundle_id], check=False, log=log, timeout=SIM_CALL_SECONDS)
         # The home screen as this persona sees it: launch motion that still
         # looks like it is the springboard's, not the app's.
         sh(["xcrun", "simctl", "io", sim.udid, "screenshot", str(folder / "home.png")], check=False, log=log)
@@ -1097,10 +1097,10 @@ def upgrade_in(source: Path, config: dict, sim: "Sim", folder: Path, log: Path, 
     if built.returncode or not old_app:
         return {**result, "unchecked": "the live version did not build"}
     sim.configure(PERSONAS["newcomer"])
-    sh(["xcrun", "simctl", "uninstall", sim.udid, bundle_id], check=False, log=log)
+    sh(["xcrun", "simctl", "uninstall", sim.udid, bundle_id], check=False, log=log, timeout=SIM_CALL_SECONDS)
     if not gated:
-        sh(["xcrun", "simctl", "install", sim.udid, str(old_app)], log=log)
-        sh(["xcrun", "simctl", "launch", sim.udid, bundle_id], check=False, log=log)
+        sh(["xcrun", "simctl", "install", sim.udid, str(old_app)], log=log, timeout=300)
+        sh(["xcrun", "simctl", "launch", sim.udid, bundle_id], check=False, log=log, timeout=SIM_CALL_SECONDS)
         time.sleep(8)
         return {**result, **launch_after_update(sim, folder, log, bundle_id, new_app)}
     env = {**os.environ, "TEST_RUNNER_QA_PERSONA": "upgrade", "TEST_RUNNER_QA_OUTPUT_DIR": str(folder),
@@ -1112,16 +1112,16 @@ def upgrade_in(source: Path, config: dict, sim: "Sim", folder: Path, log: Path, 
                *[f"-only-testing:{j}" for j in old["journeys"]]], source, env, log)
     result["seeded"] = sum(t["result"] == "Passed" for t in test_results(bundle, "upgrade"))
     if not result["seeded"]:
-        sh(["xcrun", "simctl", "install", sim.udid, str(old_app)], check=False, log=log)
+        sh(["xcrun", "simctl", "install", sim.udid, str(old_app)], check=False, log=log, timeout=300)
     return {**result, **launch_after_update(sim, folder, log, bundle_id, new_app)}
 
 
 def launch_after_update(sim: "Sim", folder: Path, log: Path, bundle_id: str, new_app: Path) -> dict:
     executable = sh(["plutil", "-extract", "CFBundleExecutable", "raw", str(new_app / "Info.plist")]).stdout.strip()
-    sh(["xcrun", "simctl", "terminate", sim.udid, bundle_id], check=False, log=log)
-    sh(["xcrun", "simctl", "install", sim.udid, str(new_app)], log=log)
+    sh(["xcrun", "simctl", "terminate", sim.udid, bundle_id], check=False, log=log, timeout=SIM_CALL_SECONDS)
+    sh(["xcrun", "simctl", "install", sim.udid, str(new_app)], log=log, timeout=300)
     started = time.time()
-    sh(["xcrun", "simctl", "launch", sim.udid, bundle_id], check=False, log=log)
+    sh(["xcrun", "simctl", "launch", sim.udid, bundle_id], check=False, log=log, timeout=SIM_CALL_SECONDS)
     time.sleep(10)
     shot = folder / "after-upgrade.png"
     # A loaded Mac can take far longer than 10 s to draw the first frame (Mahj at host load 121 was still
@@ -1136,7 +1136,7 @@ def launch_after_update(sim: "Sim", folder: Path, log: Path, bundle_id: str, new
     running = sh(["xcrun", "simctl", "spawn", sim.udid, "launchctl", "list"], check=False).stdout
     reports = [str(p) for p in (HOME / "Library" / "Logs" / "DiagnosticReports").glob(f"{executable}*.ips")
                if p.stat().st_mtime >= started]
-    sh(["xcrun", "simctl", "terminate", sim.udid, bundle_id], check=False, log=log)
+    sh(["xcrun", "simctl", "terminate", sim.udid, bundle_id], check=False, log=log, timeout=SIM_CALL_SECONDS)
     return {"alive": f"UIKitApplication:{bundle_id}" in running, "crash_reports": reports,
             "blank": blank, "screenshot": str(shot), "load": round(os.getloadavg()[0])}
 
