@@ -1,0 +1,51 @@
+#!/bin/bash
+# The few agent-sim calls qa-gate makes, on a GitHub runner with no pool:
+#   checkout <owner> [--slot N] [--any] | udid <owner> | boot <owner> | checkin <owner>
+# Slot 11 is the iPhone Duo, as on the Air; every other lease is an iPhone 17 Pro.
+set -uo pipefail
+STATE=$HOME/.agent-sim-stub
+mkdir -p "$STATE"
+cmd=${1:-}; owner=${2:-}; shift 2 2> /dev/null || true
+slot=""
+while [ $# -gt 0 ]; do
+  case $1 in --slot) slot=$2; shift 2 ;; *) shift ;; esac
+done
+
+runtime_for() {
+  xcrun simctl list runtimes -j | python3 -c '
+import json, sys
+want = sys.argv[1]
+rts = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]
+       and any(t["name"] == want for t in r.get("supportedDeviceTypes", []))]
+print(rts[-1]["identifier"] if rts else "")' "$1"
+}
+
+case $cmd in
+  checkout)
+    [ -s "$STATE/$owner" ] && { cat "$STATE/$owner"; exit 0; }
+    device="iPhone 17 Pro"
+    [ "$slot" = 11 ] && device="iPhone Duo"
+    rt=$(runtime_for "$device")
+    if [ -z "$rt" ]; then
+      xcodebuild -downloadPlatform iOS -buildVersion "$(xcrun --sdk iphonesimulator --show-sdk-version)" > /dev/null 2>&1
+      rt=$(runtime_for "$device")
+    fi
+    [ -n "$rt" ] || { echo "agent-sim stub: no runtime for $device" >&2; exit 1; }
+    udid=$(xcrun simctl create "qa-$owner" "$device" "$rt") || exit 1
+    echo "$udid" > "$STATE/$owner"
+    echo "$udid"
+    ;;
+  udid) [ -s "$STATE/$owner" ] && cat "$STATE/$owner" ;;
+  boot)
+    udid=$(cat "$STATE/$owner") || exit 1
+    xcrun simctl boot "$udid" 2> /dev/null
+    xcrun simctl bootstatus "$udid" -b > /dev/null
+    ;;
+  checkin)
+    udid=$(cat "$STATE/$owner" 2> /dev/null) || exit 0
+    xcrun simctl shutdown "$udid" 2> /dev/null
+    xcrun simctl delete "$udid" 2> /dev/null
+    rm -f "$STATE/$owner"
+    ;;
+  *) echo "agent-sim stub: $cmd is not supported on a runner" >&2; exit 2 ;;
+esac

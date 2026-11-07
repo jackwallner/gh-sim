@@ -1,0 +1,63 @@
+name: gate
+run-name: ${{ inputs.id }}
+
+# Runs one app's qa-gate release journeys on a GitHub-hosted Mac instead of the
+# Air's simulator pool. Started by ~/bin/gh-gate (through `QA_GATE_HOST=github
+# qa-gate fix`), which pushes the commit to refs/gh-gate/<id> in the app repo and
+# brings the run folder back as if the gate ran on the Air. Everything here is
+# public: never pass secrets in the inputs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      id: { description: run id, required: true }
+      repo: { description: owner/name of the app repo, required: true }
+      sha: { description: commit to gate, required: true }
+      app_dir: { description: folder name the Air uses for the repo, required: true }
+      upgrade_from: { description: commit the upgrade check starts from, default: "" }
+      xcode: { description: Xcode version folder suffix, default: "27.1" }
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: xcode-27
+    timeout-minutes: 330
+    env:
+      APP_DIR: ${{ inputs.app_dir }}
+      XCODE: ${{ inputs.xcode }}
+      QA_GATE_UPGRADE_FROM: ${{ inputs.upgrade_from }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { path: tool }
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.sha }}
+          path: ${{ inputs.app_dir }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: gate-v1-${{ inputs.repo }}-${{ github.run_id }}
+          restore-keys: gate-v1-${{ inputs.repo }}-
+      - name: Set up the gate
+        run: tool/gate.sh setup
+      - name: Run the gate
+        run: tool/gate.sh run
+      - name: Collect the run
+        if: always()
+        run: tool/gate.sh collect
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: gate-v1-${{ inputs.repo }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result
+          path: out
+          retention-days: 3
