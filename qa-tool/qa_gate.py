@@ -849,6 +849,13 @@ def cmd_install(args) -> int:
 
 def cmd_run(args) -> int:
     repo = Path(args.repo).expanduser().resolve()
+    if os.environ.get("QA_GATE_HOST") == "github" and not os.environ.get("GITHUB_ACTIONS"):
+        if args.persona or args.quick:
+            say("--persona and --quick run here; QA_GATE_HOST=github gates the full set only")
+        else:
+            receipt = gate_on_github(repo)
+            say(f"report {receipt.get('report', 'missing')}")
+            return 0 if receipt.get("verdict") == "PASS" else 1
     config = load_config(repo)
     sha = git(repo, "rev-parse", "HEAD")
     dirty = app_dirty(repo)
