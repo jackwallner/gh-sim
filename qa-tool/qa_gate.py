@@ -362,12 +362,13 @@ class Sim:
             if self.slot == DUO_SLOT:  # either iPhone Duo; slot 12 is the second one
                 choices = [["--slot", str(slot)] for slot in DUO_SLOTS]
             # A named slot (the one iPhone Duo) can be leased by another gate run: wait for it.
-            deadline = time.time() + (SLOT_WAIT if self.slot else 0)
+            # A full pool (other gates, captures, fleet jobs on the Air lane) frees up too: wait for a phone as well.
+            deadline = time.time() + SLOT_WAIT
             while not any(sh(["agent-sim", "checkout", self.owner, *extra], check=False, log=self.log).returncode == 0
                           for extra in choices):
                 if time.time() >= deadline:
                     raise SystemExit(f"qa-gate: no iOS 27 iPhone free for {self.owner}; see agent-sim status")
-                say(f"  slot {self.slot} is leased by another run; waiting")
+                say(f"  slot {self.slot} is leased by another run; waiting" if self.slot else "  every iOS 27 iPhone is leased; waiting")
                 time.sleep(60)
         self.boot()
         return self
