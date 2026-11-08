@@ -112,7 +112,7 @@ def launch_arguments(persona: dict) -> list[str]:
 # That says nothing about the app, so it gets one retry instead of a verdict.
 RUNNER_LOST = ("never finished bootstrapping", "Lost pending connection to the test runner")
 # In a verdict: the runner or simulator died, so the journey says nothing about the app.
-RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "failed to initialize for UI testing", "the simulator wedged",
+RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "Failed to install or launch the test runner", "failed to initialize for UI testing", "the simulator wedged",
                # The simulator could not start the app or lost its home screen (Sports and Baby, Nov 7 2026).
                "Failed to get launch progress", "Critical process SpringBoard crashed")
 
@@ -871,13 +871,12 @@ def cmd_install(args) -> int:
 
 def cmd_run(args) -> int:
     repo = Path(args.repo).expanduser().resolve()
-    if os.environ.get("QA_GATE_HOST") == "github" and not os.environ.get("GITHUB_ACTIONS"):
-        if args.persona or args.quick:
-            say("--persona and --quick run here; QA_GATE_HOST=github gates the full set only")
-        else:
-            receipt = gate_on_github(repo)
-            say(f"report {receipt.get('report', 'missing')}")
-            return 0 if receipt.get("verdict") == "PASS" else 1
+    if not (args.persona or args.quick) and gate_host(repo) == "github":
+        receipt = gate_on_github(repo)
+        say(f"report {receipt.get('report', 'missing')}")
+        return 0 if receipt.get("verdict") == "PASS" else 1
+    if (args.persona or args.quick) and os.environ.get("QA_GATE_HOST") == "github":
+        say("--persona and --quick run here; QA_GATE_HOST=github gates the full set only")
     config = load_config(repo)
     sha = git(repo, "rev-parse", "HEAD")
     dirty = app_dirty(repo)
@@ -984,8 +983,8 @@ def cmd_run(args) -> int:
         for name in names:
             wait_for_quiet(f"persona {name}")
             result = run_persona(sim, name)
-            if any(t["name"] == STALLED for t in result[0]):
-                say(f"  {name}: the simulator wedged; rebooting it and rerunning")
+            if any(t["name"] == STALLED or persona_runner_died(t) for t in result[0]):
+                say(f"  {name}: the simulator wedged or could not start the test runner; rebooting it and rerunning")
                 sim.reboot()
                 result = run_persona(sim, name)
             if load_flagged(result[2]):
@@ -1699,6 +1698,15 @@ def current_receipt(repo: Path) -> dict | None:
     return None if any(is_app_change(f) or TEST_CHANGE.match(f) for f in diff.stdout.splitlines()) else receipt
 
 
+def persona_runner_died(test: dict) -> bool:
+    """A journey that failed because the runner never started (Bridge, Nov 8 2026: the simulator
+    could not launch the xctrunner), so rerunning the persona costs minutes instead of a gate round."""
+    if test.get("result") == "Passed":
+        return False
+    text = " ".join([test.get("name", ""), *(test.get("failures") or [])])
+    return any(marker in text for marker in RUNNER_DIED)
+
+
 def runner_died(blocker: dict) -> bool:
     if blocker.get("fingerprint") == "unit-tests|none-ran":
         return True
@@ -1710,6 +1718,47 @@ def only_runner_died(repo: Path, receipt: dict, everything: bool) -> bool:
     """Nothing here for a fix agent: the next gate run is the fix (Fitness Streaks, Nov 5 2026, load 223)."""
     blockers, rows = fix_targets(repo, receipt, everything)
     return bool(blockers) and not rows and all(runner_died(b) for b in blockers)
+
+
+def local_gates() -> int:
+    """Other qa-gate runs on this Mac that are gating (run or fix), not this process."""
+    rows = subprocess.run(["pgrep", "-f", "bin/qa-gate (run|fix) "], capture_output=True, text=True).stdout.split()
+    return len([pid for pid in rows if int(pid) not in (os.getpid(), os.getppid())])
+
+
+def github_has_room(repo: Path) -> bool:
+    """Public repo, and fewer than 5 runs in flight on the shared GitHub Macs (2 for this repo)."""
+    url = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                         capture_output=True, text=True).stdout.strip()
+    slug = re.sub(r"\.git$", "", re.sub(r"^.*github\.com[:/]", "", url))
+    if not slug or "/" not in slug:
+        return False
+    vis = subprocess.run(["gh", "repo", "view", slug, "--json", "visibility", "-q", ".visibility"],
+                         capture_output=True, text=True).stdout.strip()
+    if vis != "PUBLIC":
+        return False
+    runs = subprocess.run(["gh", "run", "list", "-R", "jackwallner/gh-sim", "-L", "100", "--json",
+                           "status,displayTitle"], capture_output=True, text=True)
+    try:
+        live = [r for r in json.loads(runs.stdout) if r["status"] != "completed"]
+    except ValueError:
+        return False
+    name = slug.split("/")[1]
+    mine = [r for r in live if r["displayTitle"].startswith((f"{name}-", f"{name}@", f"gate-{name}"))]
+    return len(live) < 5 and len(mine) < 2
+
+
+def gate_host(repo: Path) -> str:
+    """QA_GATE_HOST=github|local wins. Otherwise a public repo goes to GitHub when this Mac already
+    runs 2 gates or is loaded, because personas wait for a quiet Mac and crowding the Air stalls them all."""
+    host = os.environ.get("QA_GATE_HOST", "auto")
+    if host != "auto" or os.environ.get("GITHUB_ACTIONS"):
+        return host
+    busy = local_gates() >= 2 or os.getloadavg()[0] > (os.cpu_count() or 1) * HOST_BUSY_PER_CORE
+    if busy and github_has_room(repo):
+        say(f"{local_gates()} other gates here, load {os.getloadavg()[0]:.0f}; GitHub has room, gating there")
+        return "github"
+    return "local"
 
 
 def gate_on_github(repo: Path) -> dict:
@@ -1746,7 +1795,7 @@ def gate_on_github(repo: Path) -> dict:
 
 def gate(repo: Path) -> dict:
     say(f"gate run at {git(repo, 'rev-parse', '--short=12', 'HEAD')}")
-    if os.environ.get("QA_GATE_HOST") == "github":
+    if gate_host(repo) == "github":
         return gate_on_github(repo)
     try:
         cmd_run(argparse.Namespace(repo=str(repo), quick=False, persona=None, no_video=False))
