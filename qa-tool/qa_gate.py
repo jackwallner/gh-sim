@@ -112,7 +112,9 @@ def launch_arguments(persona: dict) -> list[str]:
 # That says nothing about the app, so it gets one retry instead of a verdict.
 RUNNER_LOST = ("never finished bootstrapping", "Lost pending connection to the test runner")
 # In a verdict: the runner or simulator died, so the journey says nothing about the app.
-RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "failed to initialize for UI testing", "the simulator wedged")
+RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "failed to initialize for UI testing", "the simulator wedged",
+               # The simulator could not start the app or lost its home screen (Sports and Baby, Nov 7 2026).
+               "Failed to get launch progress", "Critical process SpringBoard crashed")
 
 
 # xcodebuild on a wedged simulator never exits (Baby, Nov 4 2026: stuck on the
