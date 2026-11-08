@@ -92,6 +92,7 @@ PERSONAS: dict[str, dict] = {
 # gate.json opts an app out.
 ALWAYS_PERSONAS = ["duo"]
 DUO_SLOT = 11
+DUO_SLOTS = (11, 12)
 SLOT_WAIT = 3600  # seconds to wait for a named slot another run holds
 
 # simctl's content size reaches an app only once XCUITest first queries it, so
@@ -358,6 +359,8 @@ class Sim:
             say(f"leasing a simulator ({self.owner}); waits for pool capacity")
             # The default iOS 27 phones first, then the other iOS 27 iPhone 17 Pros.
             choices = [["--slot", str(self.slot)]] if self.slot else [[], ["--slot", "1"], ["--slot", "7"]]
+            if self.slot == DUO_SLOT:  # either iPhone Duo; slot 12 is the second one
+                choices = [["--slot", str(slot)] for slot in DUO_SLOTS]
             # A named slot (the one iPhone Duo) can be leased by another gate run: wait for it.
             deadline = time.time() + (SLOT_WAIT if self.slot else 0)
             while not any(sh(["agent-sim", "checkout", self.owner, *extra], check=False, log=self.log).returncode == 0
