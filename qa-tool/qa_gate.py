@@ -46,6 +46,22 @@ HOME = Path.home()
 QA_ROOT = Path(__file__).resolve().parent
 FLEETQA = QA_ROOT / "FleetQA" / "FleetQA.swift"
 STATE = HOME / ".qa-gate"
+BUILD_KEYS = ("SUPABASE_URL", "SUPABASE_ANON_KEY")  # StatScout apps' project.yml reads these; testflight.sh sources them too
+
+
+def load_build_keys() -> None:
+    """Give local builds the keys a pre-build script requires. Never used for GitHub runs (public logs)."""
+    creds = HOME / ".baseball_credentials"
+    if all(os.environ.get(k) for k in BUILD_KEYS) or not creds.is_file():
+        return
+    for line in creds.read_text().splitlines():
+        match = re.match(r"\s*(?:export\s+)?(\w+)=[\"']?([^\"'\n]*)[\"']?\s*$", line)
+        if match and match.group(1) in BUILD_KEYS and not os.environ.get(match.group(1)):
+            os.environ[match.group(1)] = match.group(2)
+
+
+if not os.environ.get("GITHUB_ACTIONS"):
+    load_build_keys()
 RECORD60 = HOME / "fleet" / "ai" / "fleet-record60.py"
 BLOCKING = {"P0", "P1"}
 
@@ -1928,9 +1944,14 @@ def verify(repo: Path, build: str | None = None, sha: str | None = None) -> tupl
     sha = sha or git(repo, "rev-parse", "HEAD")
     store = STATE / "receipts" / (bundle_id or "")
     candidates = sorted(store.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if store.is_dir() else []
+    # A --persona or --quick run gates only part of the app; only a full run counts.
+    config = load_config(repo)
+    required = {p for p in config["personas"] if p in PERSONAS and p not in config.get("skip", [])}
     for path in candidates:
         receipt = json.loads(path.read_text())
         if receipt.get("verdict") != "PASS":
+            continue
+        if required - set(receipt.get("personas", [])) - set(receipt.get("skipped_personas", [])):
             continue
         gated = receipt["sha"]
         if gated == sha:
