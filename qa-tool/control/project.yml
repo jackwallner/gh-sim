@@ -27,7 +27,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jackwallner.qacontrol
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        TARGETED_DEVICE_FAMILY: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
   QAControlUITests:
     type: bundle.ui-testing
     platform: iOS

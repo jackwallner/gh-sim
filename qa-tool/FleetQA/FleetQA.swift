@@ -22,6 +22,8 @@ enum QA {
     static let persona = env["QA_PERSONA"] ?? "local"
     static let outputDir: URL? = env["QA_OUTPUT_DIR"].map { URL(fileURLWithPath: $0) }
     static let strict = env["QA_STRICT"] == "1"
+    /// "portrait" or "landscape" on the iPad personas; nil on every phone persona.
+    static let orientation = env["QA_ORIENTATION"]
     /// Findings of the most recent checkpoint, for FleetQA's own tests.
     static var lastFindings: [(oracle: String, severity: String, detail: String)] = []
 
@@ -33,7 +35,19 @@ enum QA {
         for (key, value) in decode([String: String].self, env["QA_LAUNCH_ENVIRONMENT"]) ?? [:] {
             app.launchEnvironment[key] = value
         }
+        rotate()
         system("launch", journey: journey) { app.launch() }
+    }
+
+    /// Turns the device to the persona's orientation (the iPad personas). Done
+    /// before every launch so the app starts in it, as a user holding the iPad
+    /// that way would see it.
+    static func rotate() {
+        guard let orientation else { return }
+        let target: UIDeviceOrientation = orientation == "landscape" ? .landscapeLeft : .portrait
+        guard XCUIDevice.shared.orientation != target else { return }
+        XCUIDevice.shared.orientation = target
+        sleep(2)  // the rotation animation outlasts the property write
     }
 
     /// Marks a span the OS animates (launch, home, relaunch) so the runner does
@@ -147,6 +161,7 @@ enum QA {
     static func relaunch(_ app: XCUIApplication, journey: String = #function) {
         system("relaunch", journey: journey) {
             app.terminate()
+            rotate()
             app.launch()
         }
     }
