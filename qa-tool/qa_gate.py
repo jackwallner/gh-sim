@@ -86,6 +86,14 @@ PERSONAS: dict[str, dict] = {
                "launch_arguments": ["-AppleLanguages", "(de)", "-AppleLocale", "de_DE"], "needs_locale": "de"},
     "duo": {"about": "iPhone Duo unfolded, the two-pane layouts", "appearance": "light", "content_size": "large",
             "contrast": False, "reduce_motion": False, "device": "duo", "video": False},
+    # iPad Pro 13-inch (agent-sim slot 13), both orientations, for apps that target iPad. Only ever
+    # added for such apps (see ipad_personas); an iPhone-only app never runs them.
+    "ipad-portrait": {"about": "iPad Pro 13-inch, portrait", "appearance": "light", "content_size": "large",
+                      "contrast": False, "reduce_motion": False, "device": "ipad", "orientation": "portrait",
+                      "video": False},
+    "ipad-landscape": {"about": "iPad Pro 13-inch, landscape", "appearance": "light", "content_size": "large",
+                       "contrast": False, "reduce_motion": False, "device": "ipad", "orientation": "landscape",
+                       "video": False},
 }
 # Personas every app runs whether or not its gate.json lists them (a third of
 # Oct 2026's app changes were Duo layouts nothing exercised). "skip": [...] in
@@ -93,6 +101,8 @@ PERSONAS: dict[str, dict] = {
 ALWAYS_PERSONAS = ["duo"]
 DUO_SLOT = 11
 DUO_SLOTS = (11, 12)
+IPAD_SLOT = 13
+IPAD_PERSONAS = ["ipad-portrait", "ipad-landscape"]
 SLOT_WAIT = 3600  # seconds to wait for a named slot another run holds
 
 # simctl's content size reaches an app only once XCUITest first queries it, so
@@ -211,6 +221,23 @@ def sha256(path: Path) -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def targets_ipad(repo: Path) -> bool:
+    """True when the app's project.yml (or its .pbxproj, for a project without one) targets iPad:
+    TARGETED_DEVICE_FAMILY includes 2."""
+    texts = [(repo / "project.yml").read_text(errors="replace")] if (repo / "project.yml").is_file() else \
+        [p.read_text(errors="replace") for p in repo.glob("*.xcodeproj/project.pbxproj")]
+    for text in texts:
+        for value in re.findall(r"TARGETED_DEVICE_FAMILY\s*[:=]\s*[\"']?([\d,\s]+)", text):
+            if "2" in re.split(r"[,\s]+", value.strip()):
+                return True
+    return False
+
+
+def ipad_personas(repo: Path, config: dict) -> list[str]:
+    """The iPad personas this app owes: both when it targets iPad, none when it is iPhone-only, minus gate.json skips."""
+    return [p for p in IPAD_PERSONAS if targets_ipad(repo) and p not in config.get("skip", [])]
 
 
 def load_config(repo: Path) -> dict:
@@ -363,13 +390,14 @@ class Sim:
             choices = [["--slot", str(self.slot)]] if self.slot else [[], ["--slot", "1"], ["--slot", "7"]]
             if self.slot == DUO_SLOT:  # either iPhone Duo; slot 12 is the second one
                 choices = [["--slot", str(slot)] for slot in DUO_SLOTS]
+            what = "iPad Pro" if self.slot == IPAD_SLOT else "iPhone"
             # A named slot (the one iPhone Duo) can be leased by another gate run: wait for it.
             # A full pool (other gates, captures, fleet jobs on the Air lane) frees up too: wait for a phone as well.
             deadline = time.time() + SLOT_WAIT
             while not any(sh(["agent-sim", "checkout", self.owner, *extra], check=False, log=self.log).returncode == 0
                           for extra in choices):
                 if time.time() >= deadline:
-                    raise SystemExit(f"qa-gate: no iOS 27 iPhone free for {self.owner}; see agent-sim status")
+                    raise SystemExit(f"qa-gate: no iOS 27 {what} free for {self.owner}; see agent-sim status")
                 say(f"  slot {self.slot} is leased by another run; waiting" if self.slot else "  every iOS 27 iPhone is leased; waiting")
                 time.sleep(60)
         self.boot()
@@ -900,7 +928,9 @@ def cmd_run(args) -> int:
     personas = args.persona.split(",") if args.persona else (["newcomer"] if args.quick else config["personas"])
     if not args.persona and not args.quick:
         personas += [p for p in ALWAYS_PERSONAS if p not in personas and p not in config.get("skip", [])]
-    personas = [p for p in personas if p in PERSONAS]
+    personas = [p for p in personas if p in PERSONAS and (p not in IPAD_PERSONAS or p in ipad_personas(repo, config))]
+    if not args.persona and not args.quick:
+        personas += [p for p in ipad_personas(repo, config) if p not in personas]
     locales = localized(repo)
     skipped = [p for p in personas if PERSONAS[p].get("needs_locale") and PERSONAS[p]["needs_locale"] not in locales]
     personas = [p for p in personas if p not in skipped]
@@ -937,6 +967,8 @@ def cmd_run(args) -> int:
         env = {**os.environ, "TEST_RUNNER_QA_PERSONA": name, "TEST_RUNNER_QA_OUTPUT_DIR": str(folder),
                "TEST_RUNNER_QA_LAUNCH_ARGUMENTS": json.dumps(launch_arguments(persona)),
                "TEST_RUNNER_QA_LAUNCH_ENVIRONMENT": json.dumps(persona.get("launch_environment", {}))}
+        if persona.get("orientation"):
+            env["TEST_RUNNER_QA_ORIENTATION"] = persona["orientation"]
         bundle = folder / "result.xcresult"
         say(f"persona {name}: {persona['about']}")
         started = time.time()
@@ -998,8 +1030,9 @@ def cmd_run(args) -> int:
             if summary:
                 motion[name] = summary
 
-    phone = [p for p in personas if PERSONAS[p].get("device") != "duo"]
+    phone = [p for p in personas if PERSONAS[p].get("device") not in ("duo", "ipad")]
     duo = [p for p in personas if PERSONAS[p].get("device") == "duo"]
+    ipad = [p for p in personas if PERSONAS[p].get("device") == "ipad"]
     if phone or not args.persona:
         with Sim(f"qa-{repo.name}", config.get("slot"), log) as sim:
             if not args.persona:
@@ -1010,6 +1043,9 @@ def cmd_run(args) -> int:
     if duo:
         with Sim(f"qa-{repo.name}-duo", DUO_SLOT, log) as sim:
             run_group(sim, duo)
+    if ipad:
+        with Sim(f"qa-{repo.name}-ipad", IPAD_SLOT, log) as sim:
+            run_group(sim, ipad)
     findings += reduce_motion_findings(motion)
     findings += source_findings(repo)
     (out / "findings.json").write_text(json.dumps(findings, indent=2) + "\n")
@@ -1354,19 +1390,29 @@ def cmd_selftest(args) -> int:
     say("building the control app")
     sh(["xcodebuild", *project, "-destination", "generic/platform=iOS Simulator", "build-for-testing", "-quiet",
         "ARCHS=arm64"], cwd=control, log=log)
-    with Sim("qa-selftest", None, log) as sim:
+    def run_control(sim: Sim, name: str, extra: dict) -> list[dict]:
+        folder = out / name
+        folder.mkdir()
         run_tests(["xcodebuild", *project, "-destination", f"id={sim.udid}", "test-without-building",
-                   "-resultBundlePath", str(out / "result.xcresult"), "-collect-test-diagnostics", "never"],
-                  control, {**os.environ, "TEST_RUNNER_QA_OUTPUT_DIR": str(out)}, log)
-    tests = test_results(out / "result.xcresult", "control")
+                   "-resultBundlePath", str(folder / "result.xcresult"), "-collect-test-diagnostics", "never"],
+                  control, {**os.environ, "TEST_RUNNER_QA_OUTPUT_DIR": str(folder), "TEST_RUNNER_QA_PERSONA": name, **extra}, log)
+        return test_results(folder / "result.xcresult", name)
+
+    tests = []
+    with Sim("qa-selftest", None, log) as sim:
+        tests += run_control(sim, "phone", {})
+    # The iPad capture is turned 90 degrees in landscape; every OCR oracle must still fire on it.
+    with Sim("qa-selftest-ipad", IPAD_SLOT, log) as sim:
+        for name, orientation in (("ipad-portrait", "portrait"), ("ipad-landscape", "landscape")):
+            tests += run_control(sim, name, {"TEST_RUNNER_QA_ORIENTATION": orientation})
     for test in tests:
-        print(f"  {test['result']:7} {test['name']}" + (f": {test['failures'][0][:300]}" if test["failures"] else ""))
-    expected = len(re.findall(r"func test\w+", (control / "QAControlUITests" / "FleetQAControlUITests.swift").read_text()))
+        print(f"  {test['result']:7} {test['persona']:15} {test['name']}" + (f": {test['failures'][0][:300]}" if test["failures"] else ""))
+    expected = 3 * len(re.findall(r"func test\w+", (control / "QAControlUITests" / "FleetQAControlUITests.swift").read_text()))
     ok = len(tests) == expected and all(t["result"] == "Passed" for t in tests)
     if ok:
         (STATE / "selftest").mkdir(parents=True, exist_ok=True)
         (STATE / "selftest" / f"{sha256(FLEETQA)}.ok").write_text(now_iso() + "\n")
-    print(f"selftest {'PASS' if ok else 'FAIL'} for FleetQA {sha256(FLEETQA)[:12]}; log {log}")
+    print(f"selftest {'PASS' if ok else 'FAIL'} for FleetQA {sha256(FLEETQA)[:12]} (phone, iPad portrait, iPad landscape); log {log}")
     return 0 if ok else 1
 
 
@@ -2001,7 +2047,8 @@ def verify(repo: Path, build: str | None = None, sha: str | None = None) -> tupl
     candidates = sorted(store.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if store.is_dir() else []
     # A --persona or --quick run gates only part of the app; only a full run counts.
     config = load_config(repo)
-    required = {p for p in config["personas"] if p in PERSONAS and p not in config.get("skip", [])}
+    required = {p for p in config["personas"] if p in PERSONAS and p not in config.get("skip", []) and p not in IPAD_PERSONAS}
+    required |= set(ipad_personas(repo, config))
     for path in candidates:
         receipt = json.loads(path.read_text())
         if receipt.get("verdict") != "PASS":

@@ -132,7 +132,7 @@ struct BrokenScreen: View {
                 .frame(width: 180, alignment: .leading)
             // The monthly figure shouts while the billed yearly price whispers.
             Text("$2.49/mo").font(.system(size: 40, weight: .bold))
-            Text("$29.99 per year").font(.caption)
+            Text("$29.99 per year").font(.footnote)
             ZStack {
                 Text("BEST VALUE PLAN").font(.headline)
                 Text("MOST POPULAR PICK").font(.headline).offset(x: 12, y: 4)
@@ -140,7 +140,7 @@ struct BrokenScreen: View {
             HStack(alignment: .top) {
                 Text("1,234,567").font(.system(size: 40, weight: .bold)).fixedSize()
                     .frame(width: 110, alignment: .leading).clipped()
-                Text("Custom").font(.title2).frame(width: 34)
+                Text("Custom").font(.system(size: 36, weight: .bold)).frame(width: 78)
             }
             Text("Save 20% \u{2014} today only")
             Text("Burned NaN kcal")
