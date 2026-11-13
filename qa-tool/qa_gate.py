@@ -39,7 +39,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HOME = Path.home()
@@ -1973,6 +1973,37 @@ def fix_agent_command(prompt: str, model: str) -> list[str]:
     return ["claude", "-p", prompt, "--model", model, "--permission-mode", "bypassPermissions"]
 
 
+LIMIT_HIT = re.compile(r"hit your .*limit.*resets (\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
+RESUME_NOTE = ("\n\nA previous attempt at this brief was cut off by a usage limit. Its uncommitted edits "
+               "are still in the working tree: review them, keep what is right, and finish the brief.")
+
+
+def limit_reset_wait(log: Path) -> int:
+    """Seconds until the usage limit named at the end of the agent log resets, or 0 if it did not hit one."""
+    match = LIMIT_HIT.search(log.read_text(errors="replace")[-2000:])
+    if not match:
+        return 0
+    hour, minute, half = int(match[1]) % 12, int(match[2] or 0), match[3].lower()
+    now = datetime.now()
+    reset = now.replace(hour=hour + (12 if half == "pm" else 0), minute=minute, second=0, microsecond=0)
+    if reset <= now:
+        reset += timedelta(days=1)
+    return int((reset - now).total_seconds()) + 120
+
+
+def run_fix_agent(repo: Path, prompt: str, model: str, log: Path) -> None:
+    """Runs the fix agent; when a usage limit cuts it off, waits for the reset and resumes on the same tree."""
+    for attempt in range(4):
+        with log.open("a" if attempt else "w") as handle:
+            subprocess.run(fix_agent_command(prompt + (RESUME_NOTE if attempt else ""), model),
+                           cwd=repo, stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        wait = limit_reset_wait(log)
+        if not wait:
+            return
+        say(f"{repo.name}: fix agent hit the usage limit; resuming in {wait // 60} min")
+        time.sleep(wait)
+
+
 def fix_rounds(repo: Path, config: dict, receipt: dict, args) -> int:
     left = None
     for round_number in range(1, args.rounds + 1):
@@ -1998,9 +2029,7 @@ def fix_rounds(repo: Path, config: dict, receipt: dict, args) -> int:
         head = git(repo, "rev-parse", "HEAD")
         before = {row.get("id") for row in read_ledger(repo)}
         prompt = FIX_PROMPT.format(brief=brief, repo=repo, project=config["project"], scheme=config["scheme"])
-        with log.open("w") as handle:
-            subprocess.run(fix_agent_command(prompt, args.model),
-                           cwd=repo, stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        run_fix_agent(repo, prompt, args.model, log)
         vet_accepts(repo, before, {item["fingerprint"]: item["severity"] for item in blockers + rows})
         if git(repo, "rev-parse", "HEAD") == head:
             say(f"{repo.name}: the agent committed nothing; see {log}")
