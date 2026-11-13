@@ -1,7 +1,7 @@
 #!/bin/bash
 # The few agent-sim calls qa-gate makes, on a GitHub runner with no pool:
 #   checkout <owner> [--slot N] [--any] | udid <owner> | boot <owner> | checkin <owner>
-# Slot 11 is the iPhone Duo, as on the Air; every other lease is an iPhone 17 Pro.
+# Slot 11 is the iPhone Duo and slot 13 the iPad Pro 13-inch, as on the Air; every other lease is an iPhone 17 Pro.
 set -uo pipefail
 STATE=$HOME/.agent-sim-stub
 mkdir -p "$STATE"
@@ -25,6 +25,12 @@ case $cmd in
     [ -s "$STATE/$owner" ] && { cat "$STATE/$owner"; exit 0; }
     device="iPhone 17 Pro"
     [ "$slot" = 11 ] && device="iPhone Duo"
+    if [ "$slot" = 13 ]; then
+      # The newest iPad Pro 13-inch this Xcode ships (M5, else M4).
+      for device in "iPad Pro 13-inch (M5)" "iPad Pro 13-inch (M4)"; do
+        [ -n "$(runtime_for "$device")" ] && break
+      done
+    fi
     rt=$(runtime_for "$device")
     if [ -z "$rt" ]; then
       xcodebuild -downloadPlatform iOS -buildVersion "$(xcrun --sdk iphonesimulator --show-sdk-version)" > /dev/null 2>&1
