@@ -24,7 +24,12 @@ jobs:
   gate:
     runs-on: xcode-27
     timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [a, b, c]
     env:
+      SHARD: ${{ matrix.shard }}
       APP_DIR: ${{ inputs.app_dir }}
       XCODE: ${{ inputs.xcode }}
       QA_GATE_UPGRADE_FROM: ${{ inputs.upgrade_from }}
@@ -58,6 +63,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: result
+          name: result-${{ matrix.shard }}
           path: out
           retention-days: 3

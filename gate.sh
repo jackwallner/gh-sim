@@ -38,7 +38,7 @@ EOF
 }
 
 run() {
-  QA_GATE_QUIET_WAIT=120 python3 "$W/tool/qa-tool/qa_gate.py" run "$APP"
+  QA_GATE_QUIET_WAIT=120 python3 "$W/tool/qa-tool/qa_gate.py" run "$APP" ${SHARD:+--shard "$SHARD"}
   echo $? > "$OUT/exit"
   exit 0
 }
