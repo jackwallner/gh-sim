@@ -2058,7 +2058,7 @@ def fix_agent_command(prompt: str, model: str) -> list[str]:
     return ["claude", "-p", prompt, "--model", model, "--permission-mode", "bypassPermissions"]
 
 
-LIMIT_HIT = re.compile(r"hit your .*limit.*resets (\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
+LIMIT_HIT = re.compile(r"hit your .*limit.*resets (?:[a-z]{3,9}\.? \d{1,2},? )?(\d{1,2})(?::(\d{2}))?\s*([ap]m)", re.I)
 RESUME_NOTE = ("\n\nA previous attempt at this brief was cut off by a usage limit. Its uncommitted edits "
                "are still in the working tree: review them, keep what is right, and finish the brief.")
 
