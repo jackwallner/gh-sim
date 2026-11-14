@@ -897,6 +897,46 @@ def cmd_install(args) -> int:
     return 0
 
 
+# GitHub gates run as three parallel jobs (gate.yml matrix); qa-gate merges their partial runs.
+# a: unit tests and the default phone personas; b: Reduce Motion, German, upgrade; c: Duo and iPad.
+SHARD_OF = {"reduce-motion": "b", "german": "b"}
+SHARDS = ("a", "b", "c")
+
+
+def shard_of(persona: str) -> str:
+    if PERSONAS[persona].get("device") in ("duo", "ipad"):
+        return "c"
+    return SHARD_OF.get(persona, "a")
+
+
+def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict]) -> dict:
+    """One receipt from the shards' partial runs, decided here exactly as a single run would be."""
+    findings: list[dict] = []
+    tests: list[dict] = []
+    motion: dict[str, dict] = {}
+    unit = upgrade = None
+    for part in partials:
+        findings += part["findings"]
+        tests += part["tests"]
+        motion.update(part["motion"])
+        unit = unit or part["unit"]
+        upgrade = upgrade or part["upgrade"]
+    findings += reduce_motion_findings(motion)
+    findings += source_findings(repo)
+    (out / "findings.json").write_text(json.dumps(findings, indent=2) + "\n")
+    config = load_config(repo)
+    vendored = repo / config["uitests_dir"] / "FleetQA" / "FleetQA.swift"
+    first = partials[0]
+    receipt = {"app": repo.name, "bundle_id": first["bundle_id"], "sha": sha, "dirty": False, "created": now_iso(),
+               "personas": first["personas"], "skipped_personas": first["skipped_personas"],
+               "journeys": config["journeys"], "tests": tests, "unit": unit, "upgrade": upgrade,
+               "checkpoints": sum(p["checkpoints"] for p in partials), "motion": motion,
+               "fleetqa_stale": sha256(vendored) != sha256(FLEETQA), "fleetqa_sha256": sha256(FLEETQA),
+               "out": str(out), "shards": [p["shard"] for p in partials]}
+    finish(repo, receipt, findings)
+    return receipt
+
+
 def cmd_run(args) -> int:
     repo = Path(args.repo).expanduser().resolve()
     if not (args.persona or args.quick) and gate_host(repo) == "github":
@@ -936,6 +976,14 @@ def cmd_run(args) -> int:
     personas = [p for p in personas if p not in skipped]
     if skipped:
         say(f"skipping {', '.join(skipped)}: the app is not localized for it")
+    all_personas = list(personas)
+    do_unit = not args.persona
+    do_upgrade = not args.persona and not args.quick
+    if args.shard:
+        personas = [p for p in personas if shard_of(p) == args.shard]
+        do_unit, do_upgrade = args.shard == "a", args.shard == "b"
+        say(f"shard {args.shard}: {', '.join(personas) or 'no personas'}"
+            f"{', unit tests' if do_unit else ''}{', upgrade check' if do_upgrade else ''}")
 
     if (repo / "project.yml").is_file():
         sh(["xcodegen", "generate"], cwd=repo, log=log)
@@ -1033,12 +1081,12 @@ def cmd_run(args) -> int:
     phone = [p for p in personas if PERSONAS[p].get("device") not in ("duo", "ipad")]
     duo = [p for p in personas if PERSONAS[p].get("device") == "duo"]
     ipad = [p for p in personas if PERSONAS[p].get("device") == "ipad"]
-    if phone or not args.persona:
+    if phone or do_unit or do_upgrade:
         with Sim(f"qa-{repo.name}", config.get("slot"), log) as sim:
-            if not args.persona:
+            if do_unit:
                 unit = run_unit_tests(repo, config, sim, out, log)
             run_group(sim, phone)
-            if not args.persona and not args.quick and bundle_id:
+            if do_upgrade and bundle_id:
                 upgrade = run_upgrade(repo, config, sim, out, log, bundle_id)
     if duo:
         with Sim(f"qa-{repo.name}-duo", DUO_SLOT, log) as sim:
@@ -1046,11 +1094,18 @@ def cmd_run(args) -> int:
     if ipad:
         with Sim(f"qa-{repo.name}-ipad", IPAD_SLOT, log) as sim:
             run_group(sim, ipad)
+    if args.shard:
+        partial = {"shard": args.shard, "personas": all_personas, "skipped_personas": skipped, "tests": tests,
+                   "checkpoints": len(checkpoints), "findings": findings, "motion": motion, "unit": unit,
+                   "upgrade": upgrade, "bundle_id": bundle_id}
+        (out / "partial.json").write_text(json.dumps(partial, indent=2) + "\n")
+        say(f"shard {args.shard} done: {len(tests)} journeys, {len(findings)} raw findings")
+        return 0
     findings += reduce_motion_findings(motion)
     findings += source_findings(repo)
     (out / "findings.json").write_text(json.dumps(findings, indent=2) + "\n")
     receipt = {"app": repo.name, "bundle_id": bundle_id, "sha": sha, "dirty": dirty, "created": now_iso(),
-               "personas": personas, "skipped_personas": skipped, "journeys": config["journeys"], "tests": tests,
+               "personas": all_personas, "skipped_personas": skipped, "journeys": config["journeys"], "tests": tests,
                "unit": unit, "upgrade": upgrade,
                "checkpoints": len(checkpoints), "motion": motion, "fleetqa_stale": stale,
                "fleetqa_sha256": sha256(FLEETQA), "out": str(out)}
@@ -1791,7 +1846,9 @@ def github_has_room(repo: Path) -> bool:
         return False
     name = slug.split("/")[1]
     mine = [r for r in live if r["displayTitle"].startswith((f"{name}-", f"{name}@", f"gate-{name}"))]
-    return len(live) < 5 and len(mine) < 2
+    # A gate run is three parallel jobs; GitHub's free plan runs five macOS jobs at once.
+    jobs = sum(len(SHARDS) if r["displayTitle"].startswith("gate-") else 1 for r in live)
+    return jobs + len(SHARDS) <= 6 and len(mine) < 2
 
 
 def gate_host(repo: Path) -> str:
@@ -1815,10 +1872,13 @@ def gate_on_github(repo: Path) -> dict:
     if fetched.returncode:
         say("gate run on GitHub failed")
         return {}
-    meta = json.loads((landing / "meta.json").read_text())
     out = repo / "build" / "qa" / sha[:12]
     if out.exists():
         shutil.rmtree(out)
+    shards = sorted(landing.glob("result-*/run/partial.json"))
+    if shards:
+        return import_shards(repo, landing, out, sha, shards)
+    meta = json.loads((landing / "meta.json").read_text())
     shutil.move(str(landing / "run"), str(out))
     remote = f"{meta['workspace']}/build/qa/{sha[:12]}"
     for path in [*out.rglob("*.json"), *out.rglob("*.jsonl"), *out.rglob("*.md")]:
@@ -1836,6 +1896,31 @@ def gate_on_github(repo: Path) -> dict:
     (STATE / "last").mkdir(parents=True, exist_ok=True)
     (STATE / "last" / f"{receipt['app']}.json").write_text(json.dumps({"out": str(out)}) + "\n")
     say(f"GitHub gate verdict {receipt['verdict']} at {sha[:12]}")
+    return current_receipt(repo) or {}
+
+
+def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[Path]) -> dict:
+    """Moves each GitHub shard's run into one run folder here, then merges and decides it."""
+    out.mkdir(parents=True)
+    partials = []
+    for partial in shards:
+        run = partial.parent
+        meta = json.loads((run.parent / "meta.json").read_text())
+        remote = f"{meta['workspace']}/build/qa/{sha[:12]}"
+        for path in [*run.rglob("*.json"), *run.rglob("*.jsonl"), *run.rglob("*.md")]:
+            text = path.read_text(errors="replace")
+            if remote in text:
+                path.write_text(text.replace(remote, str(out)))
+        part = json.loads(partial.read_text())
+        partials.append(part)
+        for item in run.iterdir():
+            name = item.name if item.is_dir() else f"{item.stem}-{part['shard']}{item.suffix}"
+            shutil.move(str(item), str(out / name))
+    shutil.rmtree(landing, ignore_errors=True)
+    receipt = merge_shards(repo, out, sha, partials)
+    (STATE / "last").mkdir(parents=True, exist_ok=True)
+    (STATE / "last" / f"{repo.name}.json").write_text(json.dumps({"out": str(out)}) + "\n")
+    say(f"GitHub gate verdict {receipt.get('verdict')} at {sha[:12]} (shards {', '.join(receipt['shards'])})")
     return current_receipt(repo) or {}
 
 
@@ -2158,7 +2243,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("install"); p.add_argument("repo"); p.set_defaults(fn=cmd_install)
     p = sub.add_parser("run"); p.add_argument("repo"); p.add_argument("--quick", action="store_true")
-    p.add_argument("--persona"); p.add_argument("--no-video", action="store_true"); p.set_defaults(fn=cmd_run)
+    p.add_argument("--persona"); p.add_argument("--no-video", action="store_true")
+    p.add_argument("--shard", choices=SHARDS); p.set_defaults(fn=cmd_run)
     p = sub.add_parser("verdict"); p.add_argument("repo"); p.set_defaults(fn=cmd_verdict)
     p = sub.add_parser("selftest"); p.set_defaults(fn=cmd_selftest)
     p = sub.add_parser("ledger"); p.add_argument("repo"); p.add_argument("action", choices=["list", "add", "accept", "fix"])
