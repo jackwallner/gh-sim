@@ -27,6 +27,7 @@ A legacy row that is fixed and comes back blocks like any new one.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import fnmatch
 import hashlib
 import json
@@ -39,6 +40,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -62,6 +64,9 @@ def load_build_keys() -> None:
 
 if not os.environ.get("GITHUB_ACTIONS"):
     load_build_keys()
+# A local gate's builds and tests must run on this Mac: the xcodebuild shim would otherwise send them to
+# GitHub when the pool is busy, where a unit test run with no output reads as "none ran" (Recovery, Nov 14).
+os.environ["GH_SIM_OVERFLOW"] = "0"
 RECORD60 = HOME / "fleet" / "ai" / "fleet-record60.py"
 BLOCKING = {"P0", "P1"}
 
@@ -492,6 +497,8 @@ def peak_load(samples: list[dict], start: float, end: float) -> float:
 
 
 def wait_for_quiet(reason: str, limit: float = QUIET_WAIT_LIMIT) -> None:
+    if os.environ.get("GITHUB_ACTIONS"):  # a hosted runner reads load 200 to 700 on 3 cores at all times
+        return
     """Launch timing on a loaded Mac measures the Mac, so let other sessions' load settle first."""
     cores = os.cpu_count() or 1
     ceiling = cores * HOST_BUSY_PER_CORE
@@ -525,6 +532,17 @@ def blank_launch(seconds: float, load: float, cores: int) -> dict | None:
         return {"severity": "P1", "review": True,
                 "note": f"; host load {load:.0f} on {cores} cores, rerun on a quiet Mac before judging"}
     return {"severity": "P1", "note": ""}
+
+
+def judge_against_reference(finding: dict, reference: dict) -> dict:
+    """A blank launch the reference app does not explain (launch_is_simulator said no) is the app's, however
+    loaded the host: it keeps its severity, with both numbers, and stops waiting for a quiet Mac to judge it."""
+    if finding["oracle"] != "blank-launch":
+        return finding
+    numbers = f"; app {reference['app']:.1f}s from main() to content, reference app {reference['reference']:.1f}s"
+    judged = {k: v for k, v in finding.items() if k != "review"}
+    detail = re.sub(r"; host load \d+ on \d+ cores, rerun on a quiet Mac before judging", "", finding["detail"])
+    return {**judged, "detail": detail + numbers}
 
 
 CONTROL_APP = QA_ROOT / "control" / "build" / "dd" / "Build" / "Products" / "Debug-iphonesimulator" / "QAControl.app"
@@ -904,8 +922,12 @@ SHARDS = ("a", "b", "c")
 
 
 def shard_of(persona: str) -> str:
-    if PERSONAS[persona].get("device") in ("duo", "ipad"):
+    # The two iPad orientations fill shard c; duo joins b, which ran 28 to 58 minutes to c's 42 to 86 (Nov 14).
+    device = PERSONAS[persona].get("device")
+    if device == "ipad":
         return "c"
+    if device == "duo":
+        return "b"
     return SHARD_OF.get(persona, "a")
 
 
@@ -937,10 +959,57 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict]) -> dict:
     return receipt
 
 
+LOCAL_LOCK = STATE / "local-gate.lock"
+
+
+_LOCKED: set[Path] = set()
+
+
+@contextmanager
+def repo_lock(repo: Path):
+    """Both hosts write build/qa/<sha>, so two gates of one checkout must not overlap. Reentrant: gate()
+    holds it across cmd_run and the receipt read."""
+    repo = repo.expanduser().resolve()
+    if repo in _LOCKED:
+        yield
+        return
+    (repo / "build" / "qa").mkdir(parents=True, exist_ok=True)
+    with (repo / "build" / "qa" / ".run.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _LOCKED.add(repo)
+        try:
+            yield
+        finally:
+            _LOCKED.discard(repo)
+
+
 def cmd_run(args) -> int:
+    """One local gate at a time across every session on this Mac (Nov 14: four at once drove load to 286,
+    wedged simulators and stretched gates to 4.5 hours). A GitHub shard runs alone on its runner."""
+    repo = Path(args.repo).expanduser().resolve()
+    if os.environ.get("GITHUB_ACTIONS"):
+        return run_here(args)
+    with repo_lock(repo):
+        full = not (args.persona or args.quick)
+        if full and gate_host(repo) == "github":
+            return run_here(args, host="github")
+        LOCAL_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        with LOCAL_LOCK.open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if full and gate_host(repo, overflow=True) == "github":
+                    say("another local gate is running on this Mac; GitHub has room, gating there")
+                    return run_here(args, host="github")
+                say("another local gate is running on this Mac; waiting for it to finish")
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            return run_here(args, host="local")
+
+
+def run_here(args, host: str | None = None) -> int:
     shard = getattr(args, "shard", None)
     repo = Path(args.repo).expanduser().resolve()
-    if not (args.persona or args.quick) and gate_host(repo) == "github":
+    if host == "github":
         receipt = gate_on_github(repo)
         say(f"report {receipt.get('report', 'missing')}")
         return 0 if receipt.get("verdict") == "PASS" else 1
@@ -1052,6 +1121,8 @@ def cmd_run(args) -> int:
                     say(f"  launch: {reference['app']:.1f}s from main() to content, reference app {reference['reference']:.1f}s")
                 if launch_is_simulator(reference):
                     found = [f for f in found if f["oracle"] != "blank-launch"]
+                elif reference:
+                    found = [judge_against_reference(f, reference) for f in found]
             persona_findings += found
             if summary:
                 say(f"  video: {summary['windows']} motion windows, {summary['events']} flicker/jump candidates "
@@ -1068,7 +1139,7 @@ def cmd_run(args) -> int:
                 say(f"  {name}: the simulator wedged or could not start the test runner; rebooting it and rerunning")
                 sim.reboot()
                 result = run_persona(sim, name)
-            if load_flagged(result[2]):
+            if load_flagged(result[2]) and not os.environ.get("GITHUB_ACTIONS"):
                 say(f"  {name}: launch timing ran on a busy Mac; rerunning it once the Mac is quiet")
                 wait_for_quiet(f"rerunning {name}")
                 result = run_persona(sim, name)
@@ -1852,13 +1923,16 @@ def github_has_room(repo: Path) -> bool:
     return jobs + len(SHARDS) <= 6 and len(mine) < 2
 
 
-def gate_host(repo: Path) -> str:
-    """QA_GATE_HOST=github|local wins. Otherwise a public repo goes to GitHub when this Mac already
-    runs 2 gates or is loaded, because personas wait for a quiet Mac and crowding the Air stalls them all."""
+def gate_host(repo: Path, overflow: bool = False) -> str:
+    """QA_GATE_HOST=github|local wins, then "host" in qa/gate.json (an app that cannot build on GitHub).
+    Otherwise a public repo goes to GitHub when this Mac already runs 2 gates or is loaded (or, with
+    overflow, holds the local gate lock), because crowding the Air stalls every persona."""
     host = os.environ.get("QA_GATE_HOST", "auto")
     if host != "auto" or os.environ.get("GITHUB_ACTIONS"):
         return host
-    busy = local_gates() >= 2 or os.getloadavg()[0] > (os.cpu_count() or 1) * HOST_BUSY_PER_CORE
+    if load_config(repo).get("host") in ("local", "github"):
+        return load_config(repo)["host"]
+    busy = overflow or local_gates() >= 2 or os.getloadavg()[0] > (os.cpu_count() or 1) * HOST_BUSY_PER_CORE
     if busy and github_has_room(repo):
         say(f"{local_gates()} other gates here, load {os.getloadavg()[0]:.0f}; GitHub has room, gating there")
         return "github"
@@ -1927,13 +2001,14 @@ def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[P
 
 def gate(repo: Path) -> dict:
     say(f"gate run at {git(repo, 'rev-parse', '--short=12', 'HEAD')}")
-    if gate_host(repo) == "github":
-        return gate_on_github(repo)
-    try:
-        cmd_run(argparse.Namespace(repo=str(repo), quick=False, persona=None, no_video=False, shard=None))
-    except (subprocess.CalledProcessError, SystemExit) as error:
-        say(f"gate run failed: {error}")
-    return current_receipt(repo) or {}
+    with repo_lock(repo):
+        if gate_host(repo) == "github":
+            return gate_on_github(repo)
+        try:
+            cmd_run(argparse.Namespace(repo=str(repo), quick=False, persona=None, no_video=False, shard=None))
+        except (subprocess.CalledProcessError, SystemExit) as error:
+            say(f"gate run failed: {error}")
+        return current_receipt(repo) or {}
 
 
 def cmd_fix(args) -> int:
@@ -2101,8 +2176,8 @@ def fix_rounds(repo: Path, config: dict, receipt: dict, args) -> int:
             return 1
         blockers, rows = fix_targets(repo, receipt, args.all)
         count = len(blockers) + len(rows)
-        if receipt["verdict"] == "PASS" and not rows:
-            say(f"{repo.name}: PASS, nothing left to fix")
+        if receipt["verdict"] == "PASS" and not (args.all and rows):
+            say(f"{repo.name}: PASS, nothing left to fix" + (f" ({len(rows)} small left in the backlog)" if rows else ""))
             return 0
         if left is not None and count >= left:
             say(f"{repo.name}: round {round_number - 1} made no progress ({count} left); stopping")
@@ -2117,18 +2192,36 @@ def fix_rounds(repo: Path, config: dict, receipt: dict, args) -> int:
         prompt = FIX_PROMPT.format(brief=brief, repo=repo, project=config["project"], scheme=config["scheme"])
         run_fix_agent(repo, prompt, args.model, log)
         vet_accepts(repo, before, {item["fingerprint"]: item["severity"] for item in blockers + rows})
-        if git(repo, "rev-parse", "HEAD") == head:
-            say(f"{repo.name}: the agent committed nothing; see {log}")
-            return 1
         if app_dirty(repo):
             say(f"{repo.name}: the agent left uncommitted app changes; see {log}")
             return 1
-        receipt = gate(repo)
+        if git(repo, "rev-parse", "HEAD") == head:
+            say(f"{repo.name}: the agent committed nothing; see {log}")
+            return 0 if receipt["verdict"] == "PASS" else 1
+        receipt = redecide(repo) or gate(repo)
     blockers, rows = fix_targets(repo, receipt, args.all) if receipt else ([], [])
-    passed = receipt.get("verdict") == "PASS" and not rows
+    passed = receipt.get("verdict") == "PASS" and not (args.all and rows)
     say(f"{repo.name}: {'PASS' if passed else 'still ' + str(len(blockers) + len(rows)) + ' to fix'} "
         f"after {args.rounds} rounds")
     return 0 if passed else 1
+
+
+JUDGEMENT_FILES = {"qa/ledger.jsonl", "qa/backlog.jsonl"}
+
+
+def redecide(repo: Path) -> dict | None:
+    """When a round changed only the ledger or backlog, the last run still describes the code: decide it again
+    against the new ledger instead of spending a gate (Quit Zyn and Recovery, Nov 14)."""
+    receipt = current_receipt(repo)
+    if not receipt:
+        return None
+    changed = git(repo, "diff", "--name-only", receipt["sha"], "HEAD").split()
+    if any(name not in JUDGEMENT_FILES for name in changed):
+        return None
+    say(f"{repo.name}: the round changed only the ledger or backlog; deciding the last run again")
+    out = Path(receipt["out"])
+    finish(repo, receipt, json.loads((out / "findings.json").read_text()))
+    return current_receipt(repo)
 
 
 def cmd_record_build(args) -> int:
