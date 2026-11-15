@@ -572,9 +572,15 @@ enum Audit {
             try app.performAccessibilityAudit(for: types) { issue in
                 // The audit walks hidden tabs too. Skip what nobody can see,
                 // within a budget so a long screen cannot stall the gate.
-                if let target = issue.element, checked < 40 {
-                    checked += 1
-                    if !(target.exists && target.isHittable) { return true }
+                if let target = issue.element {
+                    if checked < 40 {
+                        checked += 1
+                        if !(target.exists && target.isHittable) { return true }
+                    } else if !leaves.contains(where: { $0.label == target.label && $0.type == target.elementType }) {
+                        // Past the budget, an element the settled tree did not show is off screen or hidden.
+                        // Skipping it without a query keeps a long screen from taking minutes.
+                        return true
+                    }
                 }
                 let element = issue.element.map { $0.identifier.isEmpty ? $0.label : $0.identifier } ?? ""
                 var measured = ""
