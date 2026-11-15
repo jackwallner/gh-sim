@@ -938,6 +938,7 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict]) -> dict:
 
 
 def cmd_run(args) -> int:
+    shard = getattr(args, "shard", None)
     repo = Path(args.repo).expanduser().resolve()
     if not (args.persona or args.quick) and gate_host(repo) == "github":
         receipt = gate_on_github(repo)
@@ -979,10 +980,10 @@ def cmd_run(args) -> int:
     all_personas = list(personas)
     do_unit = not args.persona
     do_upgrade = not args.persona and not args.quick
-    if args.shard:
-        personas = [p for p in personas if shard_of(p) == args.shard]
-        do_unit, do_upgrade = args.shard == "a", args.shard == "b"
-        say(f"shard {args.shard}: {', '.join(personas) or 'no personas'}"
+    if shard:
+        personas = [p for p in personas if shard_of(p) == shard]
+        do_unit, do_upgrade = shard == "a", shard == "b"
+        say(f"shard {shard}: {', '.join(personas) or 'no personas'}"
             f"{', unit tests' if do_unit else ''}{', upgrade check' if do_upgrade else ''}")
 
     if (repo / "project.yml").is_file():
@@ -1094,12 +1095,12 @@ def cmd_run(args) -> int:
     if ipad:
         with Sim(f"qa-{repo.name}-ipad", IPAD_SLOT, log) as sim:
             run_group(sim, ipad)
-    if args.shard:
-        partial = {"shard": args.shard, "personas": all_personas, "skipped_personas": skipped, "tests": tests,
+    if shard:
+        partial = {"shard": shard, "personas": all_personas, "skipped_personas": skipped, "tests": tests,
                    "checkpoints": len(checkpoints), "findings": findings, "motion": motion, "unit": unit,
                    "upgrade": upgrade, "bundle_id": bundle_id}
         (out / "partial.json").write_text(json.dumps(partial, indent=2) + "\n")
-        say(f"shard {args.shard} done: {len(tests)} journeys, {len(findings)} raw findings")
+        say(f"shard {shard} done: {len(tests)} journeys, {len(findings)} raw findings")
         return 0
     findings += reduce_motion_findings(motion)
     findings += source_findings(repo)
@@ -1929,7 +1930,7 @@ def gate(repo: Path) -> dict:
     if gate_host(repo) == "github":
         return gate_on_github(repo)
     try:
-        cmd_run(argparse.Namespace(repo=str(repo), quick=False, persona=None, no_video=False))
+        cmd_run(argparse.Namespace(repo=str(repo), quick=False, persona=None, no_video=False, shard=None))
     except (subprocess.CalledProcessError, SystemExit) as error:
         say(f"gate run failed: {error}")
     return current_receipt(repo) or {}
