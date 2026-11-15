@@ -103,7 +103,7 @@ DUO_SLOT = 11
 DUO_SLOTS = (11, 12)
 IPAD_SLOT = 13
 IPAD_PERSONAS = ["ipad-portrait", "ipad-landscape"]
-SLOT_WAIT = 3600  # seconds to wait for a named slot another run holds
+SLOT_WAIT = 4 * 3600  # seconds to wait for a named slot another run holds (one iPad Pro serves every local gate)
 
 # simctl's content size reaches an app only once XCUITest first queries it, so
 # launches would render at the default size and then jump. The launch argument
