@@ -2173,8 +2173,9 @@ def publish(repo: Path) -> None:
 
 def vet_accepts(repo: Path, before: set, severities: dict[str, str]) -> None:
     """The fix agent may accept only a finding from its brief, by its exact fingerprint, and only at the
-    severity it had there. Anything else is dropped; a P0 or P1 accept stays Jack's call, except a motion
-    candidate (always P1), which exists to be judged."""
+    severity it had there. Anything else is dropped; a P0 or P1 accept is a reviewer's call (the orchestrating
+    session judges it from the screenshot, Jack 2026-11-16), except a motion candidate (always P1), which exists
+    to be judged."""
     rows = read_ledger(repo)
     added = [r for r in rows if r.get("id") not in before and r.get("status") == "accepted"]
     if not added:
@@ -2183,7 +2184,7 @@ def vet_accepts(repo: Path, before: set, severities: dict[str, str]) -> None:
     for row in added:
         severity = severities.get(row.get("match"))
         if severity is None or (severity in BLOCKING and not row["match"].startswith(MOTION_ORACLES)):
-            why = "a P0/P1 needs Jack's judgement" if severity else "not an exact fingerprint from the brief"
+            why = "a P0/P1 needs a reviewer's judgement, not the fix agent's" if severity else "not an exact fingerprint from the brief"
             say(f"  dropped accept {row.get('match')}: {why}")
             continue
         row.update({"max_severity": severity, "by": "qa-gate fix"})
