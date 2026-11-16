@@ -445,6 +445,14 @@ enum Layout {
     static func overlaps(_ app: XCUIApplication, _ leaves: [Leaf], _ rendered: [Render.Line], context: QA.Context) {
         let candidates = leaves.filter { $0.type == .staticText || $0.type == .button }
         var reported = Set<String>()
+        // One live lookup per element: a leaf that overlaps many others is asked about once, not once per pair.
+        var shown: [String: Bool] = [:]
+        func isShown(_ leaf: Leaf) -> Bool {
+            if let known = shown[leaf.key] { return known }
+            let value = visible(app, leaf)
+            shown[leaf.key] = value
+            return value
+        }
         for (i, a) in candidates.enumerated() {
             for b in candidates[(i + 1)...] where a.type == b.type {
                 let overlap = a.frame.intersection(b.frame)
@@ -469,7 +477,7 @@ enum Layout {
                 let ownB = Render.presence(b, rendered, excluding: a.label)
                 let partly = ownA >= 0.3 && ownB >= 0.3 && min(readA, readB) < 0.9
                 let garbled = max(readA, readB) < 0.9 && Render.unexplained(in: overlap, rendered, leaves: leaves)
-                guard partly || garbled, visible(app, a), visible(app, b) else { continue }
+                guard partly || garbled, isShown(a), isShown(b) else { continue }
                 reported.insert(pair)
                 QA.record(context, "overlap", "P1", pair,
                           String(format: "%@ \"%@\" overlaps \"%@\" by %.0f%%", typeName(a.type), a.name, b.name,
