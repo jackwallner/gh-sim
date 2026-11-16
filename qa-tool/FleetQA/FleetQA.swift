@@ -476,7 +476,11 @@ enum Layout {
                 let ownA = Render.presence(a, rendered, excluding: b.label)
                 let ownB = Render.presence(b, rendered, excluding: a.label)
                 let partly = ownA >= 0.3 && ownB >= 0.3 && min(readA, readB) < 0.9
+                // Stacked text that reads as one garbled line still carries letters of both labels; text
+                // of a hidden tab under an unrelated visible line does not, and asking the app whether
+                // each of those is shown costs seconds per element.
                 let garbled = max(readA, readB) < 0.9 && Render.unexplained(in: overlap, rendered, leaves: leaves)
+                    && Render.related(overlap, rendered, a, b)
                 guard partly || garbled, isShown(a), isShown(b) else { continue }
                 reported.insert(pair)
                 QA.record(context, "overlap", "P1", pair,
@@ -761,6 +765,23 @@ enum Render {
         guard !wanted.isEmpty else { return 1 }
         let drawn = lines.filter { leaf.frame.insetBy(dx: -4, dy: -4).intersects($0.frame) }.map { $0.text.lowercased() }.joined(separator: " ")
         return Double(wanted.filter { drawn.contains($0) }.count) / Double(wanted.count)
+    }
+
+    /// True when text drawn in `region` shares at least two three-letter runs with either label.
+    static func related(_ region: CGRect, _ lines: [Line], _ a: Leaf, _ b: Leaf) -> Bool {
+        func grams(_ text: String) -> Set<String> {
+            var out = Set<String>()
+            for word in text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                let chars = Array(word)
+                guard chars.count >= 3 else { continue }
+                for i in 0...(chars.count - 3) { out.insert(String(chars[i..<(i + 3)])) }
+            }
+            return out
+        }
+        let wanted = grams(a.label).union(grams(b.label))
+        guard !wanted.isEmpty else { return true }
+        let drawn = lines.filter { $0.frame.intersects(region) }.reduce(into: Set<String>()) { $0.formUnion(grams($1.text)) }
+        return drawn.intersection(wanted).count >= 2
     }
 
     /// True when OCR drew text in `region` that no element reading cleanly

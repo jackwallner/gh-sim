@@ -224,6 +224,19 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
 
 
+FLEETQA_GRACE = 48 * 3600
+
+
+def fleetqa_stale(vendored: Path) -> bool:
+    """Stale unless the vendored copy matches ~/ios/qa or passed selftest within FLEETQA_GRACE. FleetQA can change
+    while a GitHub gate is in flight; the copy that gate started with was a tested version, so it still counts."""
+    have = sha256(vendored)
+    if not have or have == sha256(FLEETQA):
+        return not have
+    marker = STATE / "selftest" / f"{have}.ok"
+    return not marker.is_file() or time.time() - marker.stat().st_mtime > FLEETQA_GRACE
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -954,7 +967,7 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: 
                "personas": first["personas"], "skipped_personas": first["skipped_personas"],
                "journeys": config["journeys"], "tests": tests, "unit": unit, "upgrade": upgrade,
                "checkpoints": sum(p["checkpoints"] for p in partials), "motion": motion,
-               "fleetqa_stale": sha256(vendored) != sha256(FLEETQA), "fleetqa_sha256": sha256(FLEETQA),
+               "fleetqa_stale": fleetqa_stale(vendored), "fleetqa_sha256": sha256(FLEETQA),
                "out": str(out), "shards": sorted(p["shard"] for p in partials)}
     if reused:
         receipt["reused"] = reused
@@ -1034,7 +1047,7 @@ def run_here(args, host: str | None = None) -> int:
     say(f"{repo.name} at {sha[:12]}{' with uncommitted app changes' if dirty else ''}; log {log}")
 
     vendored = repo / config["uitests_dir"] / "FleetQA" / "FleetQA.swift"
-    stale = sha256(vendored) != sha256(FLEETQA)
+    stale = fleetqa_stale(vendored)
     if stale:
         say("vendored FleetQA.swift is stale; the verdict will block until qa-gate install and a commit")
 
