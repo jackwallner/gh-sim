@@ -103,7 +103,7 @@ enum QA {
                 Paywall.check(app, leaves, rendered, context: context)
             }
             // Apple's audit re-renders the app at other text sizes; its motion is not the app's.
-            system("audit", journey: context.journey) { Audit.run(app, shot: shot, leaves: leaves, context: context) }
+            system("audit", journey: context.journey) { Audit.run(app, shot: shot, leaves: leaves, rendered: rendered, context: context) }
             Idle.check(app, first: shot, ambient: leaves.filter { ambient.contains($0.label) || ambient.contains($0.identifier) },
                        context: context)
             // Data that lands a few seconds late still jumps under the user's eye, so
@@ -557,18 +557,18 @@ enum Audit {
         }
     }
 
-    static func run(_ app: XCUIApplication, shot: UIImage, leaves: [Leaf] = [], context: QA.Context) {
+    static func run(_ app: XCUIApplication, shot: UIImage, leaves: [Leaf] = [], rendered: [Render.Line] = [],
+                    context: QA.Context) {
         let pixels = Idle.pixels(shot)
         do {
             var checked = 0
             // Dynamic Type and clipped-text checks re-render the app at other text
             // sizes, which shows on video and moves the layout under the other
             // oracles. The accessibility persona measures what AX3 really draws instead.
-            // On the unfolded Duo the contrast check outlives the audit's timeout on a
-            // dense split screen and keeps running in testmanagerd until the sim stalls.
-            // The phone personas check the same colors.
-            var types = XCUIAccessibilityAuditType.all.subtracting([.dynamicType, .textClipped])
-            if QA.persona == "duo" { types.remove(.contrast) }
+            // Contrast is measured from the settled tree and the screenshot below, not by the audit:
+            // the audit reports every text element it walks (hidden tabs, off-screen rows) and each
+            // report costs several element queries, which stretched a dense iPad screen to an hour.
+            let types = XCUIAccessibilityAuditType.all.subtracting([.dynamicType, .textClipped, .contrast])
             try app.performAccessibilityAudit(for: types) { issue in
                 // The audit walks hidden tabs too. Skip what nobody can see,
                 // within a budget so a long screen cannot stall the gate.
@@ -577,37 +577,44 @@ enum Audit {
                         checked += 1
                         if !(target.exists && target.isHittable) { return true }
                     } else if !leaves.contains(where: { $0.label == target.label && $0.type == target.elementType }) {
-                        // Past the budget, an element the settled tree did not show is off screen or hidden.
-                        // Skipping it without a query keeps a long screen from taking minutes.
                         return true
                     }
                 }
                 let element = issue.element.map { $0.identifier.isEmpty ? $0.label : $0.identifier } ?? ""
-                var measured = ""
-                if issue.auditType == .contrast, let target = issue.element, let pixels {
-                    // The audit flags text that passes (white on a dark brand color, iOS's own
-                    // headers); a finding stands only when the drawn pixels fail WCAG too.
-                    // The audit scrolls and re-renders as it goes, so the live frame can sit
-                    // elsewhere than the screenshot drew the element; take the frame the
-                    // tree had when the screenshot was taken.
-                    let label = target.label, type = target.elementType
-                    let frame = leaves.first { $0.label == label && $0.type == type }?.frame ?? target.frame
-                    guard let ratio = contrast(in: frame, pixels, scale: CGFloat(pixels.width) / shot.size.width)
-                    else { return true }
-                    if ratio >= (frame.height >= 24 ? 3 : 4.5) { return true }
-                    measured = String(format: " (measured %.1f:1)", ratio)
-                }
                 QA.record(context, "a11y-" + name(issue.auditType), severity(issue.auditType), element,
-                          "\(issue.compactDescription)\(measured)\(element.isEmpty ? "" : ": \"\(element)\"")")
+                          "\(issue.compactDescription)\(element.isEmpty ? "" : ": \"\(element)\"")")
                 return true
             }
         } catch {
             QA.record(context, "a11y-audit", "P3", "", "audit could not run: \(error.localizedDescription)")
         }
+        // On the unfolded Duo the pixel pass over a dense split screen is skipped; the phone personas check the same colors.
+        if QA.persona != "duo", let pixels { contrastPass(leaves, pixels, rendered, width: shot.size.width, context: context) }
     }
 }
 
 extension Audit {
+    /// WCAG contrast of every visible text leaf, read from the screenshot with no element queries. A
+    /// finding stands only when the drawn pixels fail, so white on a dark brand color passes.
+    static func contrastPass(_ leaves: [Leaf], _ pixels: (data: [UInt8], width: Int, height: Int),
+                             _ rendered: [Render.Line], width: CGFloat, context: QA.Context) {
+        let scale = CGFloat(pixels.width) / width
+        for leaf in leaves where !leaf.label.isEmpty {
+            let isText = leaf.type == .staticText || (leaf.type == .button && leaf.frame.height <= 56)
+            guard isText, leaf.frame.width >= 4, leaf.frame.height >= 4 else { continue }
+            // A hidden tab keeps its elements in the tree under the visible one, so only text the
+            // screenshot really shows in the element's frame is judged.
+            let near = rendered.filter { leaf.frame.insetBy(dx: -4, dy: -4).intersects($0.frame) }
+            let drawn = near.map { $0.text.lowercased() }.joined(separator: " ")
+            guard drawn.contains(leaf.label.lowercased()) || Render.presence(leaf, near) >= 0.5 && !Render.words(leaf.label).isEmpty
+            else { continue }
+            guard let ratio = contrast(in: leaf.frame, pixels, scale: scale),
+                  ratio < (leaf.frame.height >= 24 ? 3 : 4.5) else { continue }
+            QA.record(context, "a11y-contrast", "P2", leaf.name,
+                      String(format: "Contrast failed (measured %.1f:1): \"%@\"", ratio, leaf.name))
+        }
+    }
+
     /// WCAG contrast of the text drawn in `frame` (points): the commonest color is the
     /// background, and the text is what stands furthest from it among the pixels that
     /// differ (98th percentile: thin glyphs are mostly antialiased edge). Nil when nothing

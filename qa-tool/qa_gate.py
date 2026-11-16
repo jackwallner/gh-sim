@@ -931,8 +931,9 @@ def shard_of(persona: str) -> str:
     return SHARD_OF.get(persona, "a")
 
 
-def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict]) -> dict:
-    """One receipt from the shards' partial runs, decided here exactly as a single run would be."""
+def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: dict | None = None) -> dict:
+    """One receipt from the shards' partial runs, decided here exactly as a single run would be. reused names
+    the shards carried over from an earlier commit's run, which keep the verdict from passing."""
     findings: list[dict] = []
     tests: list[dict] = []
     motion: dict[str, dict] = {}
@@ -954,7 +955,9 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict]) -> dict:
                "journeys": config["journeys"], "tests": tests, "unit": unit, "upgrade": upgrade,
                "checkpoints": sum(p["checkpoints"] for p in partials), "motion": motion,
                "fleetqa_stale": sha256(vendored) != sha256(FLEETQA), "fleetqa_sha256": sha256(FLEETQA),
-               "out": str(out), "shards": [p["shard"] for p in partials]}
+               "out": str(out), "shards": sorted(p["shard"] for p in partials)}
+    if reused:
+        receipt["reused"] = reused
     finish(repo, receipt, findings)
     return receipt
 
@@ -1412,6 +1415,13 @@ def finish(repo: Path, receipt: dict, findings: list[dict]) -> int:
                                      "checkpoint": "", "element": "", "fingerprint": "fleetqa-untested",
                                      "detail": "this FleetQA version has not passed qa-gate selftest; "
                                                "a gate that cannot fail proves nothing"})
+        decision["verdict"] = "BLOCK"
+    if receipt.get("reused"):
+        reused = receipt["reused"]
+        decision["blockers"].append({"oracle": "shards-reused", "severity": "P1", "persona": "", "journey": "",
+                                     "checkpoint": "", "element": "", "fingerprint": "shards-reused",
+                                     "detail": f"shards {', '.join(reused['shards'])} were carried over from "
+                                               f"{reused['sha'][:12]}, not rerun here; a full gate decides"})
         decision["verdict"] = "BLOCK"
     rows = update_backlog(repo, receipt, decision)
     decision["blockers"] += (backlog_blockers(rows) + unit_blockers(receipt.get("unit"))
@@ -1887,6 +1897,12 @@ def runner_died(blocker: dict) -> bool:
     return blocker.get("oracle") == "journey-broken" and any(marker in text for marker in RUNNER_DIED)
 
 
+def only_reuse_left(repo: Path, receipt: dict, everything: bool) -> bool:
+    """Every shard that ran here is clean; only the carried-over ones keep the verdict from deciding."""
+    blockers, rows = fix_targets(repo, receipt, everything)
+    return bool(blockers) and not rows and all(b.get("fingerprint") == "shards-reused" for b in blockers)
+
+
 def only_runner_died(repo: Path, receipt: dict, everything: bool) -> bool:
     """Nothing here for a fix agent: the next gate run is the fix (Fitness Streaks, Nov 5 2026, load 223)."""
     blockers, rows = fix_targets(repo, receipt, everything)
@@ -1939,11 +1955,21 @@ def gate_host(repo: Path, overflow: bool = False) -> str:
     return "local"
 
 
-def gate_on_github(repo: Path) -> dict:
-    """Runs the journeys on a free GitHub Mac (~/bin/gh-gate) and files the run as if it had run here."""
+def gate_on_github(repo: Path, previous: dict | None = None) -> dict:
+    """Runs the journeys on a free GitHub Mac (~/bin/gh-gate) and files the run as if it had run here. With a
+    previous run, only the shards that blocked it run again and the others are carried over."""
     sha = git(repo, "rev-parse", "HEAD")
     landing = repo / "build" / "qa" / "gh-gate"
-    fetched = subprocess.run(["gh-gate", str(repo), str(landing), upgrade_from(repo) or ""], text=True)
+    rerun = shards_to_rerun(previous) if previous else list(SHARDS)
+    reused = {}
+    old = Path(previous["out"]) if previous else None
+    if old and not all((old / f"partial-{s}.json").is_file() for s in SHARDS):
+        rerun = list(SHARDS)
+    if len(rerun) < len(SHARDS):
+        reused = {s: json.loads((old / f"partial-{s}.json").read_text()) for s in SHARDS if s not in rerun}
+        say(f"regating shard(s) {', '.join(rerun)} only; {', '.join(reused)} carried over from {previous['sha'][:12]}")
+    env = {**os.environ, "GH_GATE_SHARDS": " ".join(rerun)}
+    fetched = subprocess.run(["gh-gate", str(repo), str(landing), upgrade_from(repo) or ""], text=True, env=env)
     if fetched.returncode:
         say("gate run on GitHub failed")
         return {}
@@ -1952,7 +1978,7 @@ def gate_on_github(repo: Path) -> dict:
         shutil.rmtree(out)
     shards = sorted(landing.glob("result-*/run/partial.json"))
     if shards:
-        return import_shards(repo, landing, out, sha, shards)
+        return import_shards(repo, landing, out, sha, shards, reused, previous["sha"] if previous else "")
     meta = json.loads((landing / "meta.json").read_text())
     shutil.move(str(landing / "run"), str(out))
     remote = f"{meta['workspace']}/build/qa/{sha[:12]}"
@@ -1974,10 +2000,32 @@ def gate_on_github(repo: Path) -> dict:
     return current_receipt(repo) or {}
 
 
-def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[Path]) -> dict:
-    """Moves each GitHub shard's run into one run folder here, then merges and decides it."""
+def shards_to_rerun(previous: dict) -> list[str]:
+    """The shards whose personas blocked the previous run. A blocker no shard owns (a stale FleetQA, the source
+    checks), or a previous run that was not three shards, reruns everything."""
+    if sorted(previous.get("shards") or []) != list(SHARDS):
+        return list(SHARDS)
+    owner = {"unit": "a", "upgrade": "b", **{p: shard_of(p) for p in PERSONAS}}
+    rerun = set()
+    for blocker in previous.get("blockers", []):
+        if blocker.get("fingerprint") == "shards-reused":
+            continue
+        personas = [p for p in str(blocker.get("persona") or "").split(",") if p]
+        if not personas or any(p not in owner for p in personas):
+            return list(SHARDS)
+        rerun |= {owner[p] for p in personas}
+    return sorted(rerun) or list(SHARDS)
+
+
+def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[Path],
+                  reused: dict[str, dict] | None = None, reused_sha: str = "") -> dict:
+    """Moves each GitHub shard's run into one run folder here, then merges and decides it. reused holds the
+    partial runs of shards carried over from an earlier commit, kept beside the new ones for the next regate."""
     out.mkdir(parents=True)
     partials = []
+    for shard, part in (reused or {}).items():
+        (out / f"partial-{shard}.json").write_text(json.dumps(part, indent=2) + "\n")
+        partials.append(part)
     for partial in shards:
         run = partial.parent
         meta = json.loads((run.parent / "meta.json").read_text())
@@ -1992,18 +2040,19 @@ def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[P
             name = item.name if item.is_dir() else f"{item.stem}-{part['shard']}{item.suffix}"
             shutil.move(str(item), str(out / name))
     shutil.rmtree(landing, ignore_errors=True)
-    receipt = merge_shards(repo, out, sha, partials)
+    carried = {"shards": sorted(reused), "sha": reused_sha} if reused else None
+    receipt = merge_shards(repo, out, sha, partials, carried)
     (STATE / "last").mkdir(parents=True, exist_ok=True)
     (STATE / "last" / f"{repo.name}.json").write_text(json.dumps({"out": str(out)}) + "\n")
     say(f"GitHub gate verdict {receipt.get('verdict')} at {sha[:12]} (shards {', '.join(receipt['shards'])})")
     return current_receipt(repo) or {}
 
 
-def gate(repo: Path) -> dict:
+def gate(repo: Path, previous: dict | None = None) -> dict:
     say(f"gate run at {git(repo, 'rev-parse', '--short=12', 'HEAD')}")
     with repo_lock(repo):
         if gate_host(repo) == "github":
-            return gate_on_github(repo)
+            return gate_on_github(repo, previous)
         try:
             cmd_run(argparse.Namespace(repo=str(repo), quick=False, persona=None, no_video=False, shard=None))
         except (subprocess.CalledProcessError, SystemExit) as error:
@@ -2171,10 +2220,14 @@ def fix_rounds(repo: Path, config: dict, receipt: dict, args) -> int:
         if receipt and only_runner_died(repo, receipt, args.all):
             say(f"{repo.name}: only the test runner failed, which says nothing about the code; gating again")
             receipt = gate(repo)
+        if receipt and only_reuse_left(repo, receipt, args.all):
+            say(f"{repo.name}: the regated shards are clean; gating every shard to decide")
+            receipt = gate(repo)
         if not receipt:
             say("the gate did not finish; see the last run's gate.log")
             return 1
         blockers, rows = fix_targets(repo, receipt, args.all)
+        blockers = [b for b in blockers if b.get("fingerprint") != "shards-reused"]
         count = len(blockers) + len(rows)
         if receipt["verdict"] == "PASS" and not (args.all and rows):
             say(f"{repo.name}: PASS, nothing left to fix" + (f" ({len(rows)} small left in the backlog)" if rows else ""))
@@ -2198,7 +2251,10 @@ def fix_rounds(repo: Path, config: dict, receipt: dict, args) -> int:
         if git(repo, "rev-parse", "HEAD") == head:
             say(f"{repo.name}: the agent committed nothing; see {log}")
             return 0 if receipt["verdict"] == "PASS" else 1
-        receipt = redecide(repo) or gate(repo)
+        receipt = redecide(repo) or gate(repo, receipt)
+    if receipt and only_reuse_left(repo, receipt, args.all):
+        say(f"{repo.name}: the regated shards are clean; gating every shard to decide")
+        receipt = gate(repo)
     blockers, rows = fix_targets(repo, receipt, args.all) if receipt else ([], [])
     passed = receipt.get("verdict") == "PASS" and not (args.all and rows)
     say(f"{repo.name}: {'PASS' if passed else 'still ' + str(len(blockers) + len(rows)) + ' to fix'} "
