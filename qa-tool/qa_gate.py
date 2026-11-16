@@ -976,6 +976,8 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: 
 
 
 LOCAL_LOCK = STATE / "local-gate.lock"
+# Two local gates fit the Air at normal load (agent-sim target 3); four drove load to 286 on Nov 14.
+LOCAL_SLOTS = (LOCAL_LOCK, STATE / "local-gate-2.lock")
 
 
 _LOCKED: set[Path] = set()
@@ -1000,7 +1002,7 @@ def repo_lock(repo: Path):
 
 
 def cmd_run(args) -> int:
-    """One local gate at a time across every session on this Mac (Nov 14: four at once drove load to 286,
+    """At most two local gates across every session on this Mac (Nov 14: four at once drove load to 286,
     wedged simulators and stretched gates to 4.5 hours). A GitHub shard runs alone on its runner."""
     repo = Path(args.repo).expanduser().resolve()
     if os.environ.get("GITHUB_ACTIONS"):
@@ -1010,15 +1012,19 @@ def cmd_run(args) -> int:
         if full and gate_host(repo) == "github":
             return run_here(args, host="github")
         LOCAL_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        for slot in LOCAL_SLOTS:
+            with slot.open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                return run_here(args, host="local")
+        if full and gate_host(repo, overflow=True) == "github":
+            say("both local gate slots are busy on this Mac; GitHub has room, gating there")
+            return run_here(args, host="github")
+        say("both local gate slots are busy on this Mac; waiting for the first to finish")
         with LOCAL_LOCK.open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                if full and gate_host(repo, overflow=True) == "github":
-                    say("another local gate is running on this Mac; GitHub has room, gating there")
-                    return run_here(args, host="github")
-                say("another local gate is running on this Mac; waiting for it to finish")
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            fcntl.flock(lock, fcntl.LOCK_EX)
             return run_here(args, host="local")
 
 
