@@ -16,6 +16,7 @@ on:
       app_dir: { description: folder name the Air uses for the repo, required: true }
       upgrade_from: { description: commit the upgrade check starts from, default: "" }
       xcode: { description: Xcode version folder suffix, default: "27.1" }
+      shards: { description: JSON list of shards to run, default: '["a", "b", "c"]' }
 
 permissions:
   contents: read
@@ -28,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [a, b, c]
+        shard: ${{ fromJSON(inputs.shards) }}
     env:
       SHARD: ${{ matrix.shard }}
       APP_DIR: ${{ inputs.app_dir }}
