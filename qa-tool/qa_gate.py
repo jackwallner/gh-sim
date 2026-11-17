@@ -131,7 +131,11 @@ RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "Failed to install or launc
                # The simulator could not start the app or lost its home screen (Sports and Baby, Nov 7 2026).
                "Failed to get launch progress", "Critical process SpringBoard crashed",
                # XCTest could not stop the app between journeys; it did not repeat on regate (Ironman, Posture, Nov 16).
-               "Failed to terminate")
+               "Failed to terminate",
+               # XCTest gave up launching the app before any app code ran; same journey passed in the
+               # other iPad orientation (Sports ipad-portrait on a GitHub runner, Nov 17). A real launch
+               # hang repeats on the regate and goes to the fix agent.
+               "Timed out while launching application via Xcode")
 
 
 # xcodebuild on a wedged simulator never exits (Baby, Nov 4 2026: stuck on the
