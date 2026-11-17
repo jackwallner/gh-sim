@@ -515,7 +515,15 @@ enum Layout {
         guard element.exists else { return false }
         let frame = element.frame
         guard !frame.isEmpty, app.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return false }
-        return element.isHittable
+        // A hidden tab's chip can sit mid-frame yet have no activation point; the
+        // answer is then "no", not a failed test.
+        var hittable = false
+        let options = XCTExpectedFailure.Options()
+        options.isStrict = false
+        XCTExpectFailure("an element with no activation point is not hittable", options: options) {
+            hittable = element.isHittable
+        }
+        return hittable
     }
 
     static func typeName(_ type: XCUIElement.ElementType) -> String {
