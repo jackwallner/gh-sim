@@ -96,14 +96,26 @@ jobs:
           ref: ${{ inputs.sha }}
           path: app
           persist-credentials: false
+      # Two caches, each saved once per key. Until Nov 17 2026 every run restored the last cache and
+      # saved a bigger one: the compile cache grew until restoring it filled the runner's disk (22 runs
+      # died at this step, Mahj and Ravel most) and the repo sat over GitHub's 10 GB cache limit.
+      - name: Cache keys
+        id: keys
+        run: echo "week=$(date -u +%G%V)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v4
+        id: spm
         with:
           path: |
             ~/Library/Caches/org.swift.swiftpm
             dd/SourcePackages
-            dd/CompilationCache.noindex
-          key: v1-${{ inputs.repo }}-${{ github.run_id }}
-          restore-keys: v1-${{ inputs.repo }}-
+          key: spm-v2-${{ inputs.repo }}-${{ steps.keys.outputs.week }}-${{ hashFiles('app/**/Package.resolved') }}
+          restore-keys: spm-v2-${{ inputs.repo }}-
+      # The compile cache starts empty each week, so it holds one week of builds at most.
+      - uses: actions/cache/restore@v4
+        id: cc
+        with:
+          path: dd/CompilationCache.noindex
+          key: cc-v2-${{ inputs.repo }}-${{ steps.keys.outputs.week }}
       - name: Build
         id: build
         run: tool/run.sh build
@@ -111,19 +123,24 @@ jobs:
         if: inputs.mode == 'test' || inputs.mode == 'all'
         run: tool/run.sh test
       # In `all`, screenshots still come back when tests fail.
-      # Duo unfold and native recording need more than a phone's 10 minutes.
+      # A phone launch took about 5 minutes after the build on the 3-core runner and 44 runs hit the old
+      # 10-minute cap (Nov 7-17 2026). Duo unfold and native recording need longer still.
       - name: Launch and screenshot
-        timeout-minutes: ${{ (contains(inputs.device, 'Duo') || inputs.record_seconds != '0') && 25 || 10 }}
+        timeout-minutes: ${{ (contains(inputs.device, 'Duo') || inputs.record_seconds != '0') && 35 || 20 }}
         if: (inputs.mode == 'launch' && success()) || (inputs.mode == 'all' && !cancelled() && steps.build.outcome == 'success')
         run: tool/run.sh launch
       - uses: actions/cache/save@v4
-        if: always()
+        if: steps.build.outcome == 'success' && steps.spm.outputs.cache-hit != 'true'
         with:
           path: |
             ~/Library/Caches/org.swift.swiftpm
             dd/SourcePackages
-            dd/CompilationCache.noindex
-          key: v1-${{ inputs.repo }}-${{ github.run_id }}
+          key: spm-v2-${{ inputs.repo }}-${{ steps.keys.outputs.week }}-${{ hashFiles('app/**/Package.resolved') }}
+      - uses: actions/cache/save@v4
+        if: steps.build.outcome == 'success' && steps.cc.outputs.cache-hit != 'true'
+        with:
+          path: dd/CompilationCache.noindex
+          key: cc-v2-${{ inputs.repo }}-${{ steps.keys.outputs.week }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

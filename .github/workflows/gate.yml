@@ -17,6 +17,7 @@ on:
       upgrade_from: { description: commit the upgrade check starts from, default: "" }
       xcode: { description: Xcode version folder suffix, default: "27.1" }
       shards: { description: JSON list of shards to run, default: '["a", "b", "c"]' }
+      personas: { description: 'with shards ["recheck"]: the comma-separated personas a fix round rechecks', default: "" }
 
 permissions:
   contents: read
@@ -34,6 +35,7 @@ jobs:
       SHARD: ${{ matrix.shard }}
       APP_DIR: ${{ inputs.app_dir }}
       XCODE: ${{ inputs.xcode }}
+      PERSONAS: ${{ inputs.personas }}
       QA_GATE_UPGRADE_FROM: ${{ inputs.upgrade_from }}
     steps:
       - uses: actions/checkout@v5
@@ -46,10 +48,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/cache/restore@v4
+        id: spm
         with:
           path: ~/Library/Caches/org.swift.swiftpm
-          key: gate-v1-${{ inputs.repo }}-${{ github.run_id }}
-          restore-keys: gate-v1-${{ inputs.repo }}-
+          key: gate-v2-${{ inputs.repo }}-${{ hashFiles(format('{0}/**/Package.resolved', inputs.app_dir)) }}
       - name: Set up the gate
         run: tool/gate.sh setup
       - name: Run the gate
@@ -58,10 +60,10 @@ jobs:
         if: always()
         run: tool/gate.sh collect
       - uses: actions/cache/save@v4
-        if: always()
+        if: steps.spm.outputs.cache-hit != 'true' && matrix.shard != 'b' && matrix.shard != 'c'
         with:
           path: ~/Library/Caches/org.swift.swiftpm
-          key: gate-v1-${{ inputs.repo }}-${{ github.run_id }}
+          key: gate-v2-${{ inputs.repo }}-${{ hashFiles(format('{0}/**/Package.resolved', inputs.app_dir)) }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

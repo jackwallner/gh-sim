@@ -117,7 +117,7 @@ for d in json.load(sys.stdin)["devices"].get(sys.argv[1], []):
   # xcodebuild boot it.
   setenv UDID "$UDID"
   is_duo && duo_setup
-  note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), $DEVICE on ${rt##*.}, runner $(sysctl -n hw.ncpu) cores"
+  note "xcode $(xcodebuild -version | head -1 | cut -d' ' -f2), $DEVICE on ${rt##*.}, runner $(sysctl -n hw.ncpu) cores, $(free_gb) GB free"
 }
 
 # The Air's slim pool (fleet/ai/air-sim-lane.py): the device is already leased and booted as $UDID.
@@ -168,8 +168,15 @@ zip_products() {
   [ -d "$st" ] && ditto -c -k "$st" "$OUT/products.zip" && note "products.zip: $(cd "$st" && ls -d */*.app | tr '\n' ' ')"
 }
 
+free_gb() { df -g "$W" | awk 'NR == 2 {print $4}'; }
+
 do_build() {
   locate
+  # A restored compile cache is only a speed-up: drop it rather than build on a nearly full disk.
+  if [ "$(free_gb)" -lt 8 ] && [ -d "$DD/CompilationCache.noindex" ]; then
+    rm -rf "$DD/CompilationCache.noindex"
+    note "disk nearly full; dropped the restored compile cache, $(free_gb) GB free now"
+  fi
   setenv SCHEME "$SCHEME"
   local t=$SECONDS
   xb build > "$OUT/build.log" 2>&1

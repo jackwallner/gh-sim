@@ -39,7 +39,8 @@ EOF
 
 run() {
   local rc=0
-  QA_GATE_QUIET_WAIT=0 python3 "$W/tool/qa-tool/qa_gate.py" run "$APP" ${SHARD:+--shard "$SHARD"} || rc=$?
+  QA_GATE_QUIET_WAIT=0 python3 "$W/tool/qa-tool/qa_gate.py" run "$APP" ${SHARD:+--shard "$SHARD"} \
+    ${PERSONAS:+--persona "$PERSONAS"} || rc=$?
   echo $rc > "$OUT/exit"
   # A shard that wrote no partial crashed or was cut off: fail the job so `gh run rerun --failed` reruns it.
   if [ -n "$SHARD" ] && ! ls "$APP"/build/qa/*/partial.json > /dev/null 2>&1; then
