@@ -940,6 +940,8 @@ def cmd_install(args) -> int:
 # a: unit tests and the default phone personas; b: Reduce Motion, German, upgrade; c: Duo and iPad.
 SHARD_OF = {"reduce-motion": "b", "german": "b"}
 SHARDS = ("a", "b", "c")
+# Not a shard of the gate: the personas a fix round rechecks on one GitHub Mac, with no unit or upgrade check.
+RECHECK = "recheck"
 
 
 def shard_of(persona: str) -> str:
@@ -1079,7 +1081,9 @@ def run_here(args, host: str | None = None) -> int:
     all_personas = list(personas)
     do_unit = not args.persona
     do_upgrade = not args.persona and not args.quick
-    if shard:
+    if shard == RECHECK:
+        say(f"recheck: {', '.join(personas) or 'no personas'}")
+    elif shard:
         personas = [p for p in personas if shard_of(p) == shard]
         do_unit, do_upgrade = shard == "a", shard == "b"
         say(f"shard {shard}: {', '.join(personas) or 'no personas'}"
@@ -1170,7 +1174,7 @@ def run_here(args, host: str | None = None) -> int:
                 sim.reboot()
                 result = run_persona(sim, name)
             elif any(persona_flaked(t) for t in result[0]):
-                say(f"  {name}: a UI query timed out; rerunning the persona once")
+                say(f"  {name}: a journey failed without blaming the app; rerunning the persona once")
                 sim.reboot()
                 result = run_persona(sim, name)
             if load_flagged(result[2]) and not os.environ.get("GITHUB_ACTIONS"):
@@ -1470,7 +1474,9 @@ def finish(repo: Path, receipt: dict, findings: list[dict]) -> int:
     report.write_text(render(receipt, decision))
     receipt["report"] = str(report)
     (out / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    if receipt["verdict"] == "PASS" and receipt.get("bundle_id"):
+    # A recheck or --persona run passes on part of the app: it must not replace the commit's gate receipt.
+    whole = not (repo / "qa" / "gate.json").is_file() or covers_gate(repo, receipt)
+    if receipt["verdict"] == "PASS" and receipt.get("bundle_id") and whole:
         store = STATE / "receipts" / receipt["bundle_id"]
         store.mkdir(parents=True, exist_ok=True)
         (store / f"{receipt['sha']}.json").write_text(json.dumps(receipt, indent=2) + "\n")
@@ -1903,6 +1909,12 @@ def fix_targets(repo: Path, receipt: dict, everything: bool) -> tuple[list[dict]
     return blockers, rows
 
 
+def fix_targets_of(receipt: dict) -> list[dict]:
+    """A run's own blockers and unjudged motion candidates: no backlog rows, no carried-shard marker."""
+    items = [b for b in receipt.get("blockers", []) if not b.get("backlog")] + receipt.get("review", [])
+    return [b for b in items if b.get("fingerprint") != "shards-reused"]
+
+
 def current_receipt(repo: Path) -> dict | None:
     """The last run's receipt when it gated HEAD's app and test code with a clean tree. Commits since that
     touch neither (another session's docs, the backlog) keep it current; a test fix or FleetQA sync does
@@ -1932,12 +1944,20 @@ def persona_runner_died(test: dict) -> bool:
 # run (Sunset, Ironman, Posture, Nov 16-17 2026), so the persona reruns once in place; a query that
 # times out again is a real hang and blocks.
 QUERY_TIMEOUT = "Timed out while evaluating UI query"
+# How a journey says the app or the journey itself is wrong: an assertion, an XCTFail, a thrown error or an
+# element that is not there. Any other failure is XCTest unable to launch, query, screenshot or stop the app
+# (five wordings in the two weeks to Nov 17 2026 that no marker matched), which says nothing about the app.
+APP_FAILURE = ("XCTAssert", "XCTUnwrap", "failed - ", "Expectation failed", "threw error", "No matches found")
 
 
 def persona_flaked(test: dict) -> bool:
-    if test.get("result") == "Passed":
+    """A failed journey with a UI query timeout, or with no failure that blames the app. The persona reruns
+    once in place; a repeat still blocks."""
+    failures = test.get("failures") or []
+    if test.get("result") == "Passed" or not failures:
         return False
-    return QUERY_TIMEOUT in " ".join(test.get("failures") or [])
+    text = " ".join(failures)
+    return QUERY_TIMEOUT in text or not any(marker in text for marker in APP_FAILURE)
 
 
 def runner_died(blocker: dict) -> bool:
@@ -1965,16 +1985,22 @@ def local_gates() -> int:
     return len([pid for pid in rows if int(pid) not in (os.getpid(), os.getppid())])
 
 
-def github_has_room(repo: Path) -> bool:
-    """Public repo, and fewer than 5 runs in flight on the shared GitHub Macs (2 for this repo)."""
+def public_slug(repo: Path) -> str:
+    """owner/name when the checkout's origin is a public GitHub repo (the only kind the free Macs run)."""
     url = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
                          capture_output=True, text=True).stdout.strip()
     slug = re.sub(r"\.git$", "", re.sub(r"^.*github\.com[:/]", "", url))
     if not slug or "/" not in slug:
-        return False
+        return ""
     vis = subprocess.run(["gh", "repo", "view", slug, "--json", "visibility", "-q", ".visibility"],
                          capture_output=True, text=True).stdout.strip()
-    if vis != "PUBLIC":
+    return slug if vis == "PUBLIC" else ""
+
+
+def github_has_room(repo: Path) -> bool:
+    """Public repo, and fewer than 5 runs in flight on the shared GitHub Macs (2 for this repo)."""
+    slug = public_slug(repo)
+    if not slug:
         return False
     runs = subprocess.run(["gh", "run", "list", "-R", "jackwallner/gh-sim", "-L", "100", "--json",
                            "status,displayTitle"], capture_output=True, text=True)
@@ -2098,6 +2124,143 @@ def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[P
     return current_receipt(repo) or {}
 
 
+def recheck_personas(previous: dict) -> list[str]:
+    """The personas that own everything a run blocked on, or none when something no persona owns blocked
+    (unit tests, the upgrade check, a source check, a stale FleetQA): only a gate run covers those."""
+    found: set[str] = set()
+    for item in fix_targets_of(previous):
+        names = [p for p in str(item.get("persona") or "").split(",") if p]
+        if not names or any(p not in PERSONAS for p in names):
+            return []
+        found |= set(names)
+    if "reduce-motion" in found:
+        found.add("newcomer")  # Reduce Motion is judged against the same journeys without it
+    return sorted(found)
+
+
+def local_slot_free() -> bool:
+    for slot in LOCAL_SLOTS:
+        slot.parent.mkdir(parents=True, exist_ok=True)
+        with slot.open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            return True
+    return False
+
+
+def recheck_host(repo: Path) -> str:
+    """Here when the Air has a free gate slot and is not loaded. Otherwise one GitHub Mac for a public repo:
+    the recheck queues there instead of crowding the Air. A private repo waits for a local slot."""
+    host = os.environ.get("QA_GATE_HOST", "auto")
+    if host in ("local", "github"):
+        return host
+    if load_config(repo).get("host") in ("local", "github"):
+        return load_config(repo)["host"]
+    busy = not local_slot_free() or os.getloadavg()[0] > (os.cpu_count() or 1) * HOST_BUSY_PER_CORE
+    return "github" if busy and public_slug(repo) else "local"
+
+
+def recheck_on_github(repo: Path, personas: list[str]) -> dict:
+    sha = git(repo, "rev-parse", "HEAD")
+    landing = repo / "build" / "qa" / "gh-gate"
+    env = {**os.environ, "GH_GATE_SHARDS": RECHECK, "GH_GATE_PERSONAS": ",".join(personas)}
+    if subprocess.run(["gh-gate", str(repo), str(landing), ""], text=True, env=env).returncode:
+        say("recheck on GitHub failed")
+        return {}
+    out = repo / "build" / "qa" / sha[:12]
+    if out.exists():
+        shutil.rmtree(out)
+    shards = sorted(landing.glob("result-*/run/partial.json"))
+    return import_shards(repo, landing, out, sha, shards) if shards else {}
+
+
+def recheck(repo: Path, personas: list[str]) -> dict | None:
+    """Runs only the personas that blocked: minutes on one simulator, against a gate's three Macs for about
+    an hour each (Nov 7-17 2026: 75% of gate runs blocked, often on the blocker the round was meant to fix).
+    None when the recheck did not finish."""
+    host = recheck_host(repo)
+    say(f"rechecking {', '.join(personas)} {'on one GitHub Mac' if host == 'github' else 'here'} before a gate")
+    head = git(repo, "rev-parse", "HEAD")
+    with repo_lock(repo):
+        if host == "github":
+            receipt = recheck_on_github(repo, personas)
+        else:
+            try:
+                cmd_run(argparse.Namespace(repo=str(repo), quick=False, persona=",".join(personas),
+                                           no_video=False, shard=None))
+            except (subprocess.CalledProcessError, SystemExit) as error:
+                say(f"recheck failed: {error}")
+            receipt = current_receipt(repo) or {}
+    return receipt if receipt.get("sha") == head else None
+
+
+def gate_after_fix(repo: Path, previous: dict) -> dict:
+    """What a fix round is judged by. When personas own every blocker, they are rechecked first: if they still
+    block, that run is the verdict and no gate is spent; if they are clean, a full gate decides. Anything else
+    regates as before."""
+    personas = recheck_personas(previous)
+    receipt = recheck(repo, personas) if personas else None
+    if receipt is None:
+        return gate(repo, previous)
+    left = fix_targets_of(receipt)
+    if left:
+        say(f"{repo.name}: {len(left)} still blocking after the fix; no gate spent")
+        return receipt
+    say(f"{repo.name}: the rechecked personas are clean; gating everything to decide")
+    return gate(repo)
+
+
+def covers_gate(repo: Path, receipt: dict) -> bool:
+    """A --persona, --quick or recheck run judged part of the app, so its PASS is not the gate's."""
+    return not required_personas(repo) - set(receipt.get("personas", [])) - set(receipt.get("skipped_personas", []))
+
+
+# A blocker the fix agent has failed to clear this many rounds in a row goes to a reviewer instead of costing
+# more rounds (Nov 7-17 2026: Ironman gated 9 times and Elderhub 7 without converging).
+STUCK_ROUNDS = 3
+
+
+def stuck_file(repo: Path) -> Path:
+    return STATE / "stuck" / f"{bundle_from(repo) or repo.name}.json"
+
+
+def note_survivors(repo: Path, briefed: set[str], receipt: dict) -> list[str]:
+    """Counts the fix rounds each briefed blocker has now survived, across qa-gate fix calls, and returns the
+    ones that reached STUCK_ROUNDS. A blocker the run no longer reports starts over."""
+    path = stuck_file(repo)
+    old = json.loads(path.read_text())["rounds"] if path.is_file() else {}
+    now = {b["fingerprint"] for b in fix_targets_of(receipt) if not runner_died(b)}
+    rounds = {fp: old.get(fp, 0) + 1 for fp in briefed & now}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"sha": git(repo, "rev-parse", "HEAD"), "rounds": rounds}, indent=2) + "\n")
+    return sorted(fp for fp, count in rounds.items() if count >= STUCK_ROUNDS)
+
+
+def still_stuck(repo: Path) -> list[str]:
+    """Blockers that reached STUCK_ROUNDS with nothing changed since: no app, test, ledger or backlog commit.
+    Any such commit (a hand fix, a reviewer's accept, a FleetQA sync) clears the count."""
+    path = stuck_file(repo)
+    if not path.is_file():
+        return []
+    record = json.loads(path.read_text())
+    stuck = sorted(fp for fp, count in record["rounds"].items() if count >= STUCK_ROUNDS)
+    diff = sh(["git", "-C", str(repo), "diff", "--name-only", record["sha"], "HEAD"], check=False)
+    changed = diff.returncode or any(is_app_change(f) or TEST_CHANGE.match(f) or f in JUDGEMENT_FILES
+                                     for f in diff.stdout.splitlines())
+    if changed or not stuck:
+        if changed:
+            path.unlink()
+        return []
+    return stuck
+
+
+def stuck_message(repo: Path, stuck: list[str]) -> str:
+    return (f"{repo.name}: {len(stuck)} blocker(s) survived {STUCK_ROUNDS} fix rounds; stopping for a reviewer "
+            f"(fix by hand, accept in the ledger, or qa-gate fix --retry-stuck): {'; '.join(stuck[:5])}")
+
+
 def gate(repo: Path, previous: dict | None = None) -> dict:
     say(f"gate run at {git(repo, 'rev-parse', '--short=12', 'HEAD')}")
     with repo_lock(repo):
@@ -2118,7 +2281,16 @@ def cmd_fix(args) -> int:
     config = load_config(repo)
     sync_fleetqa(repo, config)
     merge_core_branch(repo)
-    receipt = current_receipt(repo) or gate(repo)
+    stuck = [] if args.retry_stuck else still_stuck(repo)
+    if stuck:
+        say(stuck_message(repo, stuck))
+        return 1
+    if args.retry_stuck:
+        stuck_file(repo).unlink(missing_ok=True)
+    receipt = current_receipt(repo)
+    if receipt and receipt["verdict"] == "PASS" and not covers_gate(repo, receipt):
+        receipt = None
+    receipt = receipt or gate(repo)
     try:
         return fix_rounds(repo, config, receipt, args)
     finally:
@@ -2305,7 +2477,11 @@ def fix_rounds(repo: Path, config: dict, receipt: dict, args) -> int:
         if git(repo, "rev-parse", "HEAD") == head:
             say(f"{repo.name}: the agent committed nothing; see {log}")
             return 0 if receipt["verdict"] == "PASS" else 1
-        receipt = redecide(repo) or gate(repo, receipt)
+        receipt = redecide(repo) or gate_after_fix(repo, receipt)
+        stuck = note_survivors(repo, {b["fingerprint"] for b in blockers}, receipt) if receipt else []
+        if stuck:
+            say(stuck_message(repo, stuck))
+            return 1
     if receipt and only_reuse_left(repo, receipt, args.all):
         say(f"{repo.name}: the regated shards are clean; gating every shard to decide")
         receipt = gate(repo)
@@ -2347,6 +2523,12 @@ def cmd_record_build(args) -> int:
     return 0
 
 
+def required_personas(repo: Path) -> set[str]:
+    config = load_config(repo)
+    required = {p for p in config["personas"] if p in PERSONAS and p not in config.get("skip", []) and p not in IPAD_PERSONAS}
+    return required | set(ipad_personas(repo, config))
+
+
 def verify(repo: Path, build: str | None = None, sha: str | None = None) -> tuple[bool, str]:
     """Is there a passing receipt for the code in this build? Returns (ok, explanation)."""
     bundle_id = bundle_from(repo)
@@ -2364,9 +2546,7 @@ def verify(repo: Path, build: str | None = None, sha: str | None = None) -> tupl
     store = STATE / "receipts" / (bundle_id or "")
     candidates = sorted(store.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if store.is_dir() else []
     # A --persona or --quick run gates only part of the app; only a full run counts.
-    config = load_config(repo)
-    required = {p for p in config["personas"] if p in PERSONAS and p not in config.get("skip", []) and p not in IPAD_PERSONAS}
-    required |= set(ipad_personas(repo, config))
+    required = required_personas(repo)
     for path in candidates:
         receipt = json.loads(path.read_text())
         if receipt.get("verdict") != "PASS":
@@ -2448,7 +2628,7 @@ def main() -> int:
     p = sub.add_parser("install"); p.add_argument("repo"); p.set_defaults(fn=cmd_install)
     p = sub.add_parser("run"); p.add_argument("repo"); p.add_argument("--quick", action="store_true")
     p.add_argument("--persona"); p.add_argument("--no-video", action="store_true")
-    p.add_argument("--shard", choices=SHARDS); p.set_defaults(fn=cmd_run)
+    p.add_argument("--shard", choices=(*SHARDS, RECHECK)); p.set_defaults(fn=cmd_run)
     p = sub.add_parser("verdict"); p.add_argument("repo"); p.set_defaults(fn=cmd_verdict)
     p = sub.add_parser("selftest"); p.set_defaults(fn=cmd_selftest)
     p = sub.add_parser("ledger"); p.add_argument("repo"); p.add_argument("action", choices=["list", "add", "accept", "fix"])
@@ -2458,6 +2638,7 @@ def main() -> int:
     p.add_argument("action", nargs="?", default="list", choices=["list", "brief", "sync"])
     p.add_argument("-v", "--verbose", action="store_true"); p.set_defaults(fn=cmd_backlog)
     p = sub.add_parser("fix"); p.add_argument("repo"); p.add_argument("--rounds", type=int, default=3)
+    p.add_argument("--retry-stuck", action="store_true")
     p.add_argument("--all", action="store_true", help="legacy backlog too")
     p.add_argument("--model", default=FIX_MODEL); p.set_defaults(fn=cmd_fix)
     p = sub.add_parser("verify"); p.add_argument("repo"); p.add_argument("--build"); p.add_argument("--sha")
