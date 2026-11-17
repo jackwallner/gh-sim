@@ -2124,6 +2124,9 @@ def sync_fleetqa(repo: Path, config: dict) -> None:
     vendored = repo / config["uitests_dir"] / "FleetQA" / "FleetQA.swift"
     if vendored.exists() and sha256(vendored) == sha256(FLEETQA):
         return
+    if vendored.exists() and not selftest_ok():
+        say("~/ios/qa FleetQA has not passed selftest yet; keeping the vendored copy")
+        return
     vendored.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(FLEETQA, vendored)
     git(repo, "add", str(vendored.relative_to(repo)))
