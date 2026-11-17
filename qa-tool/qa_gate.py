@@ -135,7 +135,9 @@ RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "Failed to install or launc
                # XCTest gave up launching the app before any app code ran; same journey passed in the
                # other iPad orientation (Sports ipad-portrait on a GitHub runner, Nov 17). A real launch
                # hang repeats on the regate and goes to the fix agent.
-               "Timed out while launching application via Xcode", "via Xcode: Timed out")
+               "Timed out while launching application via Xcode", "via Xcode: Timed out",
+               # The relaunch never produced a process, so no app code ran (Sports duo, Nov 17).
+               "does not have a process ID")
 
 
 # xcodebuild on a wedged simulator never exits (Baby, Nov 4 2026: stuck on the
