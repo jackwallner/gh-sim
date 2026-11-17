@@ -25,7 +25,7 @@ on:
       scheme: { description: scheme, required: true }
       clean: { description: "true: xcodebuild clean first", default: "false" }
       post_archive: { description: command run on the archive before upload, default: "" }
-      extra_args: { description: extra archive xcodebuild args, space-separated, default: "" }
+      extra_args: { description: "extra archive xcodebuild args, space-separated", default: "" }
       files_secret: { description: "NAME of the APP_FILES_<NAME> secret, empty for none", default: "" }
       xcode: { description: Xcode version folder suffix, default: "27.1" }
 
@@ -99,8 +99,23 @@ jobs:
           [ -n "$POST_ARCHIVE" ] && args+=(--post-archive "$POST_ARCHIVE")
           read -ra extra <<< "$EXTRA_ARGS"
           [ ${#extra[@]} -gt 0 ] && args+=(-- "${extra[@]}")
-          ASC_KEY_PATH=$RUNNER_TEMP/asc.p8 bash ~/ios/release/testflight.sh "${args[@]}" ||
-            { tail -60 build/testflight-*.log 2> /dev/null; exit 1; }
+          upload() { ASC_KEY_PATH=$RUNNER_TEMP/asc.p8 bash ~/ios/release/testflight.sh "${args[@]}"; }
+          # Apple's signing and App Store Connect servers drop a request now and then (5 of the 12
+          # failed uploads up to Nov 17 2026). Nothing was uploaded, so one retry here costs minutes
+          # where a failed job costs a new wait in the queue.
+          dropped() {
+            ! grep -q "Upload succeeded" build/testflight-*.log 2> /dev/null &&
+              grep -qE "network connection was lost|request timed out|unexpected status code: 5[0-9][0-9]" \
+                build/testflight-*.log 2> /dev/null
+          }
+          upload && exit 0
+          if dropped; then
+            echo "Apple's servers dropped a request and nothing was uploaded; trying once more in a minute"
+            sleep 60
+            upload && exit 0
+          fi
+          tail -60 build/testflight-*.log 2> /dev/null
+          exit 1
       - name: Remove credentials
         if: always()
         run: |
