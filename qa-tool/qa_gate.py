@@ -14,7 +14,7 @@ build whose commit has no passing receipt.
     qa-gate ledger ~/vitals list|add|accept|fix ...
     qa-gate backlog ~/vitals [list|brief|sync]  P2/P3 findings kept in qa/backlog.jsonl until a run no longer sees them
     qa-gate backlog all                      open backlog per gated app in ~
-    qa-gate fix ~/vitals [--all] [--rounds 3]   gate, agent fixes, rebuild, gate again until PASS
+    qa-gate fix ~/vitals [--all] [--rounds 3] [--retry-stuck]   gate, agent fixes, recheck, gate again until PASS
     qa-gate verify ~/vitals [--build N]      exit 0 when the build's commit has a passing receipt
     qa-gate record-build ~/vitals N          testflight.sh: build N was archived from HEAD
 
