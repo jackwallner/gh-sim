@@ -129,7 +129,9 @@ RUNNER_LOST = ("never finished bootstrapping", "Lost pending connection to the t
 # In a verdict: the runner or simulator died, so the journey says nothing about the app.
 RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "Failed to install or launch the test runner", "failed to initialize for UI testing", "the simulator wedged",
                # The simulator could not start the app or lost its home screen (Sports and Baby, Nov 7 2026).
-               "Failed to get launch progress", "Critical process SpringBoard crashed")
+               "Failed to get launch progress", "Critical process SpringBoard crashed",
+               # XCTest could not stop the app between journeys; it did not repeat on regate (Ironman, Posture, Nov 16).
+               "Failed to terminate")
 
 
 # xcodebuild on a wedged simulator never exits (Baby, Nov 4 2026: stuck on the
@@ -967,7 +969,7 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: 
                "personas": first["personas"], "skipped_personas": first["skipped_personas"],
                "journeys": config["journeys"], "tests": tests, "unit": unit, "upgrade": upgrade,
                "checkpoints": sum(p["checkpoints"] for p in partials), "motion": motion,
-               "fleetqa_stale": fleetqa_stale(vendored), "fleetqa_sha256": sha256(FLEETQA),
+               "fleetqa_stale": fleetqa_stale(vendored), "fleetqa_sha256": sha256(vendored),
                "out": str(out), "shards": sorted(p["shard"] for p in partials)}
     if reused:
         receipt["reused"] = reused
@@ -1202,7 +1204,7 @@ def run_here(args, host: str | None = None) -> int:
                "personas": all_personas, "skipped_personas": skipped, "journeys": config["journeys"], "tests": tests,
                "unit": unit, "upgrade": upgrade,
                "checkpoints": len(checkpoints), "motion": motion, "fleetqa_stale": stale,
-               "fleetqa_sha256": sha256(FLEETQA), "out": str(out)}
+               "fleetqa_sha256": sha256(vendored), "out": str(out)}
     return finish(repo, receipt, findings)
 
 
@@ -1429,7 +1431,7 @@ def unit_blockers(unit: dict | None) -> list[dict]:
 
 def finish(repo: Path, receipt: dict, findings: list[dict]) -> int:
     decision = decide(findings, receipt["tests"], read_ledger(repo), receipt.get("fleetqa_stale", False))
-    if not selftest_ok():
+    if not fleetqa_tested(receipt):
         decision["blockers"].append({"oracle": "fleetqa-untested", "severity": "P1", "persona": "", "journey": "",
                                      "checkpoint": "", "element": "", "fingerprint": "fleetqa-untested",
                                      "detail": "this FleetQA version has not passed qa-gate selftest; "
@@ -1531,6 +1533,13 @@ def render(receipt: dict, decision: dict) -> str:
 
 def selftest_ok() -> bool:
     return (STATE / "selftest" / f"{sha256(FLEETQA)}.ok").is_file()
+
+
+def fleetqa_tested(receipt: dict) -> bool:
+    """The FleetQA the gate actually ran (the vendored copy the receipt records) passed selftest. A later,
+    untested edit in ~/ios/qa says nothing about this run (Fitness Streaks hotfix, Nov 16)."""
+    ran = receipt.get("fleetqa_sha256")
+    return bool(ran) and (STATE / "selftest" / f"{ran}.ok").is_file() or selftest_ok()
 
 
 def cmd_selftest(args) -> int:
