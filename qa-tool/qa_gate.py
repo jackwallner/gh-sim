@@ -1167,6 +1167,10 @@ def run_here(args, host: str | None = None) -> int:
                 say(f"  {name}: the simulator wedged or could not start the test runner; rebooting it and rerunning")
                 sim.reboot()
                 result = run_persona(sim, name)
+            elif any(persona_flaked(t) for t in result[0]):
+                say(f"  {name}: a UI query timed out; rerunning the persona once")
+                sim.reboot()
+                result = run_persona(sim, name)
             if load_flagged(result[2]) and not os.environ.get("GITHUB_ACTIONS"):
                 say(f"  {name}: launch timing ran on a busy Mac; rerunning it once the Mac is quiet")
                 wait_for_quiet(f"rerunning {name}")
@@ -1920,6 +1924,18 @@ def persona_runner_died(test: dict) -> bool:
         return False
     text = " ".join([test.get("name", ""), *(test.get("failures") or [])])
     return any(marker in text for marker in RUNNER_DIED)
+
+
+# XCTest gave up on an accessibility query. On GitHub runners it moved to a different journey every
+# run (Sunset, Ironman, Posture, Nov 16-17 2026), so the persona reruns once in place; a query that
+# times out again is a real hang and blocks.
+QUERY_TIMEOUT = "Timed out while evaluating UI query"
+
+
+def persona_flaked(test: dict) -> bool:
+    if test.get("result") == "Passed":
+        return False
+    return QUERY_TIMEOUT in " ".join(test.get("failures") or [])
 
 
 def runner_died(blocker: dict) -> bool:
