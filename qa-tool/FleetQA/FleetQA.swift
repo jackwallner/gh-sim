@@ -492,7 +492,7 @@ enum Layout {
 
     /// Resolves a snapshot leaf back to a live element and asks whether a tap
     /// would reach it: false for hidden tabs, covered views and clipped scroll content.
-    static func visible(_ app: XCUIApplication, _ leaf: Leaf) -> Bool {
+    static func visible(_ app: XCUIApplication, _ leaf: Leaf, tolerant: Bool = true) -> Bool {
         let parts = leaf.key.split(separator: "#")
         let index = Int(parts.last ?? "0") ?? 0
         let query = leaf.identifier.isEmpty
@@ -505,14 +505,16 @@ enum Layout {
                 && abs(frame.width - leaf.frame.width) < 1 && abs(frame.height - leaf.frame.height) < 1
         }
         let element = query.allElementsBoundByIndex.first { near($0.frame) } ?? query.element(boundBy: index)
-        return tappable(app, element)
+        return tappable(app, element, tolerant: tolerant)
     }
 
     /// isHittable records a test failure when an element has no valid activation
     /// point (a date chip scrolled half out of a narrow strip), so anything whose
     /// centre is outside the screen is answered here without asking.
-    static func tappable(_ app: XCUIApplication, _ element: XCUIElement) -> Bool {
+    static func tappable(_ app: XCUIApplication, _ element: XCUIElement, tolerant: Bool = true) -> Bool {
         guard element.exists else { return false }
+        // A main button that overhangs the screen is still the main button: ask it plainly.
+        guard tolerant else { return element.isHittable }
         let frame = element.frame
         guard !frame.isEmpty, app.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return false }
         // A hidden tab's chip can sit mid-frame yet have no activation point; the
@@ -930,7 +932,7 @@ enum Anchor {
         let candidates = leaves
             .filter { $0.type == .button && !$0.inScroll && $0.frame.width >= width * 0.5 && $0.frame.midY >= height * 0.6 }
             .sorted { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }
-        return candidates.prefix(6).first { Layout.visible(app, $0) }
+        return candidates.prefix(6).first { Layout.visible(app, $0, tolerant: false) }
     }
 
     /// Onboarding and paywall steps share one call to action. When it jumps
