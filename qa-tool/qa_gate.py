@@ -838,7 +838,7 @@ def motion_findings(video: Path, checkpoints: list[dict], started: float, person
                        "checkpoint": step["checkpoint"] if step else "launch", "element": "",
                        "detail": f"blank screen for {span['blank_seconds']:.1f}s after the springboard zoom "
                                  f"(simulator timing; a device is faster, the order of events is the same)"
-                                 + blank["note"]}
+                                 + blank["note"], "at": raw["start"]}
             findings.append({**finding, "review": True} if blank.get("review") else finding)
         if span.get("app_from") and raw["end"] - span["end"] > 0.3:
             target = video.with_name(f"entrance-{number:02d}-{slug(raw['journey'])}.png")
@@ -857,7 +857,7 @@ def motion_findings(video: Path, checkpoints: list[dict], started: float, person
                              "checkpoint": step["checkpoint"], "element": "",
                              "detail": f"{event['type']} candidate at {event['at']:.2f}s of {video.name} "
                                        f"(score {event['score']})",
-                             "sheet": event.get("sheet")})
+                             "sheet": event.get("sheet"), "at": started + event["at"]})
     summary = {"video": str(video), "video_started": started, "entrance_sheets": entrances, "motion_seconds": result.get("motion_seconds"),
                "motion_60fps": result.get("motion_60fps"), "windows": len(result.get("motion_windows", [])),
                "events": result.get("events"), "system_events": ignored,
@@ -1105,9 +1105,14 @@ def run_here(args, host: str | None = None) -> int:
     bundle_id = config.get("bundle_id") or bundle_from(repo)
     unit = upgrade = None
 
-    def run_persona(sim: Sim, name: str) -> tuple[list[dict], list[dict], list[dict], dict | None]:
+    timeline: dict[str, list[dict]] = {}  # persona -> its journeys in running order, from the last whole run
+    persistent: set[str] = set()  # journeys that flaked and failed again on a persona in this run
+
+    def run_persona(sim: Sim, name: str,
+                    again: list[str] | None = None) -> tuple[list[dict], list[dict], list[dict], dict | None]:
+        """Runs every journey for the persona, or only the tests in `again`, kept apart in a rerun folder."""
         persona = {**PERSONAS[name], **config["persona_overrides"].get(name, {})}
-        folder = out / name
+        folder = out / name / "rerun" if again else out / name
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir()
         sim.configure(persona)
@@ -1122,11 +1127,14 @@ def run_here(args, host: str | None = None) -> int:
         if persona.get("orientation"):
             env["TEST_RUNNER_QA_ORIENTATION"] = persona["orientation"]
         bundle = folder / "result.xcresult"
-        say(f"persona {name}: {persona['about']}")
+        if not again:
+            say(f"persona {name}: {persona['about']}")
         started = time.time()
         video = folder / "journeys.mp4"
         command = ["xcodebuild", *project, "-destination", f"id={sim.udid}", "test-without-building",
-                   "-resultBundlePath", str(bundle), "-collect-test-diagnostics", "never", *only]
+                   "-resultBundlePath", str(bundle), "-collect-test-diagnostics", "never",
+                   *([f"-only-testing:{test}" for test in again] if again else only)]
+        logged = log.stat().st_size if log.exists() else 0
         with LoadSampler(folder / "load.jsonl") as sampler:
             if args.no_video or persona.get("video") is False:
                 stalled = run_tests(command, repo, env, log)
@@ -1135,6 +1143,10 @@ def run_here(args, host: str | None = None) -> int:
                     started = recorder.started
                     stalled = run_tests(command, repo, env, log)
         persona_tests = test_results(bundle, name)
+        if not again:
+            with log.open(errors="ignore") as stream:
+                stream.seek(logged)
+                timeline[name] = journey_runs(stream.read())
         if stalled:
             # A verdict must not pass on the journeys that never reported.
             persona_tests.append({"persona": name, "name": STALLED, "result": "Stalled",
@@ -1174,9 +1186,30 @@ def run_here(args, host: str | None = None) -> int:
                 sim.reboot()
                 result = run_persona(sim, name)
             elif any(persona_flaked(t) for t in result[0]):
-                say(f"  {name}: a journey failed without blaming the app; rerunning the persona once")
-                sim.reboot()
-                result = run_persona(sim, name)
+                flaked = {t["name"] for t in result[0] if persona_flaked(t)}
+                plan = rerun_plan(timeline.get(name, []), result[0], config["journeys"], result[1])
+                if flaked <= persistent:
+                    # The verdict already blocks on these journeys; another rerun would only cost the time.
+                    say(f"  {name}: {', '.join(sorted(flaked))} failed again after a rerun on another persona; "
+                        f"not rerunning")
+                elif plan:
+                    say(f"  {name}: a journey failed without blaming the app; rerunning the first {len(plan[0])} "
+                        f"of {len(result[0])} journeys once")
+                    sim.reboot()
+                    short = run_persona(sim, name, plan[0])
+                    if flaked <= {t["name"] for t in short[0]}:
+                        result = merge_rerun(result, short, plan[1])
+                        # What later steps read from disk (screenshots for the fix brief) follows the merged result.
+                        (out / name / "checkpoints.jsonl").write_text(
+                            "".join(json.dumps(p) + "\n" for p in result[1]))
+                    else:
+                        say(f"  {name}: the short rerun did not report on the flaked journey; rerunning the persona")
+                        result = run_persona(sim, name)
+                else:
+                    say(f"  {name}: a journey failed without blaming the app; rerunning the persona once")
+                    sim.reboot()
+                    result = run_persona(sim, name)
+                persistent.update(t["name"] for t in result[0] if t["name"] in flaked and t["result"] != "Passed")
             if load_flagged(result[2]) and not os.environ.get("GITHUB_ACTIONS"):
                 say(f"  {name}: launch timing ran on a busy Mac; rerunning it once the Mac is quiet")
                 wait_for_quiet(f"rerunning {name}")
@@ -1958,6 +1991,69 @@ def persona_flaked(test: dict) -> bool:
         return False
     text = " ".join(failures)
     return QUERY_TIMEOUT in text or not any(marker in text for marker in APP_FAILURE)
+
+
+TEST_STARTED = re.compile(r"^\s*Test Case '-\[(\S+) (\w+)\]' started\.")
+TEST_CLOCK = re.compile(r"Start Test at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)")
+TEST_ENDED = re.compile(r"^\s*Test Case '-\[\S+ (\w+)\]' (?:passed|failed) \(([\d.]+) seconds\)")
+
+
+def journey_runs(text: str) -> list[dict]:
+    """The journeys in the order xcodebuild ran them, read from its log: name, test class, and the wall-clock
+    start and end. A journey the runner started twice keeps its last run. Empty when two classes share a
+    journey name, because the results could not be told apart."""
+    runs: dict[tuple[str, str], dict] = {}
+    current = None
+    for line in text.splitlines():
+        started = TEST_STARTED.match(line)
+        if started:
+            current = {"name": started[2], "class": started[1].split(".")[-1], "start": None, "end": None}
+            runs.pop((current["class"], current["name"]), None)
+            runs[(current["class"], current["name"])] = current
+        elif current and current["start"] is None and TEST_CLOCK.search(line):
+            current["start"] = datetime.strptime(TEST_CLOCK.search(line)[1], "%Y-%m-%d %H:%M:%S.%f").timestamp()
+        elif current and TEST_ENDED.match(line) and TEST_ENDED.match(line)[1] == current["name"]:
+            if current["start"] is not None:
+                current["end"] = current["start"] + float(TEST_ENDED.match(line)[2])
+            current = None
+    names = [run["name"] for run in runs.values()]
+    return list(runs.values()) if len(names) == len(set(names)) else []
+
+
+def rerun_plan(runs: list[dict], tests: list[dict], journeys: list[str],
+               points: list[dict]) -> tuple[list[str], float] | None:
+    """After a flake: the tests to run again, and the moment from which the first pass still stands.
+
+    Journeys share the app's data in running order (17 of 29 apps number theirs: onboarding, then steps that
+    build on it), so one journey cannot be rerun alone. The rerun starts from a fresh install and replays
+    everything through the last journey that did not pass, which is exactly what those journeys saw the first
+    time. The journeys after it passed and are kept. A flaky journey took a whole persona rerun before
+    (Hockey, Nov 17 2026: the first of 7 journeys flaked and a shard ran 144 minutes).
+
+    None when the log cannot order the journeys or nothing would be saved; the whole persona reruns then."""
+    order = [run["name"] for run in runs]
+    failed = {t["name"] for t in tests if t["result"] not in ("Passed", "Skipped")}
+    if not failed or {t["name"] for t in tests} - set(order):
+        return None
+    last = max(order.index(name) for name in failed)
+    classes = {journey.rsplit("/", 1)[-1]: journey for journey in journeys}
+    cut = runs[last]["end"]
+    if last == len(order) - 1 or cut is None or any(run["class"] not in classes for run in runs):
+        return None
+    # The log's clock must agree with the checkpoints' before it decides which results to keep.
+    if any((p["started"] <= cut) != (order.index(p["journey"]) <= last) for p in points if p.get("journey") in order):
+        return None
+    return [f"{classes[run['class']]}/{run['name']}" for run in runs[:last + 1]], cut
+
+
+def merge_rerun(first: tuple, rerun: tuple, cut: float) -> tuple:
+    """A persona's results after its opening journeys were rerun: the rerun speaks for every journey it ran,
+    the first pass for what it saw after `cut`, when the last rerun journey ended the first time."""
+    again = {t["name"] for t in rerun[0]}
+    tests = rerun[0] + [t for t in first[0] if t["name"] not in again]
+    points = rerun[1] + [p for p in first[1] if p.get("started", cut + 1) > cut]
+    findings = rerun[2] + [f for f in first[2] if f.get("at", cut + 1) > cut]
+    return tests, points, findings, first[3]
 
 
 def runner_died(blocker: dict) -> bool:
