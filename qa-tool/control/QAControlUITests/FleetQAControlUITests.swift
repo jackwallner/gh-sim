@@ -95,4 +95,18 @@ final class FleetQAControlUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Saved QA Tester"].waitForExistence(timeout: 10),
                       "Save did not reach Today: \(app.staticTexts.allElementsBoundByIndex.map(\.label))")
     }
+
+    /// Overlap fires on a pinned label drawn over a row, and stays quiet for rows that
+    /// scroll under the tab bar or under an opaque Continue bar (Nov 18 2026: those were
+    /// 600 of 766 overlap findings in the fleet).
+    func testOverlapUnderPinnedBars() {
+        let app = XCUIApplication()
+        QA.launch(app, environment: ["QA_CONTROL_SCREEN": "underbars"])
+        XCTAssertTrue(app.buttons["MOST POPULAR PICK"].waitForExistence(timeout: 20))
+        QA.checkpoint(app, "underbars")
+        let overlaps = QA.lastFindings.filter { $0.oracle == "overlap" }.map(\.detail)
+        XCTAssertTrue(overlaps.contains { $0.contains("BEST VALUE PLAN") }, "pinned label over a row not caught: \(overlaps)")
+        let under = overlaps.filter { $0.contains("Continue") || $0.contains("\"Home\"") || $0.contains("\"More\"") }
+        XCTAssertTrue(under.isEmpty, "rows under a pinned bar flagged: \(under)")
+    }
 }

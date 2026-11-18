@@ -13,6 +13,7 @@ struct QAControlApp: App {
             case "blank": Color.white.ignoresSafeArea()
             case "tabs": Tabs()
             case "motion": MotionPlant()
+            case "underbars": UnderBars()
             default: Flow(broken: false)
             }
         }
@@ -207,10 +208,59 @@ struct SettingsList: View {
     var body: some View {
         List {
             ForEach(1...40, id: \.self) { Text("Setting \($0)") }
-            // Autocorrect rewrites a name on Return ("Tester" became "Teste"), so a name field turns it off.
-            TextField("Name", text: $name).autocorrectionDisabled().accessibilityIdentifier("settings.name")
+            TextField("Name", text: $name).accessibilityIdentifier("settings.name")
             Button("Save") { saved = name }
         }
-        .navigationTitle("Settings \(name)")  // DEBUG
+    }
+}
+
+/// The overlap oracle's control for what lies under pinned things. Rows scroll under
+/// the tab bar and under an opaque Continue bar that cuts row 4's second line, as
+/// fleet lists do under their bars: not an overlap. A pinned label with no backing
+/// drawn over the first row shows the row through it: an overlap.
+struct UnderBars: View {
+    private let rows = (1...30).map { "Row \($0): every sunrise score for the week ahead" }
+    /// Rows are 60 pt tall from the top of the list, so the bar's top edge at 280 pt
+    /// crosses row 4 (240 to 300) under its first line.
+    private let pitch: CGFloat = 60
+
+    var body: some View {
+        TabView {
+            list.tabItem { Label("Home", systemImage: "house") }
+            Text("Second tab").tabItem { Label("More", systemImage: "ellipsis") }
+        }
+    }
+
+    private var list: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {} label: { Text("MOST POPULAR PICK").font(.headline) }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, minHeight: pitch, maxHeight: pitch, alignment: .topLeading)
+                ForEach(rows, id: \.self) { row in
+                    Button {} label: {
+                        Text(row).font(.title3).lineLimit(2)
+                            .frame(maxWidth: .infinity, minHeight: pitch, maxHeight: pitch, alignment: .topLeading)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+        .overlay(alignment: .topLeading) {
+            Button {} label: { Text("BEST VALUE PLAN").font(.headline) }
+                .buttonStyle(.plain)
+                .offset(x: 36, y: 4)
+        }
+        .overlay(alignment: .top) {
+            Button {} label: {
+                Text("Continue").font(.headline).foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.blue)
+            }
+            .buttonStyle(.plain)
+            .frame(height: 2 * pitch)
+            .offset(y: 4 * pitch + 40)
+        }
     }
 }

@@ -2728,7 +2728,10 @@ def vet_accepts(repo: Path, before: set, severities: dict[str, str]) -> None:
         say(f"  accepted {row['match']} ({severity}): {row.get('reason')}")
     write_ledger(repo, [r for r in rows if r not in added or r in kept])
     git(repo, "add", "qa/ledger.jsonl")
-    git(repo, "commit", "-q", "-m", "chore(qa): vet the fix agent's ledger accepts")
+    # Dropping an uncommitted accept can leave the ledger as committed; an empty commit would end the loop
+    # (Bond, Nov 18 2026).
+    if git(repo, "diff", "--cached", "--name-only", "--", "qa/ledger.jsonl"):
+        git(repo, "commit", "-q", "-m", "chore(qa): vet the fix agent's ledger accepts")
 
 
 def fix_agent_command(prompt: str, model: str) -> list[str]:

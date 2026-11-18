@@ -478,9 +478,16 @@ enum Layout {
         guard !found.isEmpty else { return }
         // A frame caught mid-transition, or glass still blending what scrolled under it, reads
         // differently a moment later. Only an overlap that a second capture still shows is drawn.
+        // Frames are read again with it: a card that lands late moves the pair (the control
+        // app's broken screen does), and the old frames would point at the wrong pixels.
         usleep(700_000)
+        guard let fresh = leaves(app)?.leaves else { return }
         let again = Render.read(QA.capture(app))
-        for item in found where drawnOver(item.a, item.b, item.region, again, leaves) {
+        let now = Dictionary(fresh.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        for item in found {
+            guard let a = now[item.a.key], let b = now[item.b.key] else { continue }
+            let region = a.frame.intersection(b.frame)
+            guard !region.isNull, region.width > 2, region.height > 2, drawnOver(a, b, region, again, fresh) else { continue }
             QA.record(context, "overlap", "P1", item.pair,
                       String(format: "%@ \"%@\" overlaps \"%@\" by %.0f%%", typeName(item.a.type), item.a.name,
                              item.b.name, 100 * item.share))
@@ -1264,8 +1271,9 @@ extension QA {
     }
 
     /// Puts exactly `text` in a field or text view: taps it (scrolling it clear
-    /// first), waits for keyboard focus, deletes what was there, types, and checks
-    /// the field reads back `text`, clearing and typing once more if it does not.
+    /// first), waits for keyboard focus, deletes what was there, types it a character
+    /// at a time, and checks the field reads back `text`, clearing and typing once
+    /// more if it does not.
     /// Pass `verify: false` for a field that formats what it shows.
     static func type(_ text: String, into field: XCUIElement, in app: XCUIApplication, replacing: Bool = true,
                      verify: Bool = true, file: StaticString = #filePath, line: UInt = #line) {
@@ -1277,7 +1285,9 @@ extension QA {
         let checks = verify && field.elementType != .secureTextField
         for attempt in 0..<2 {
             if replacing || attempt > 0 { clear(field) }
-            field.typeText(text)
+            // One keystroke at a time: typed as one string, SwiftUI's binding often missed the
+            // last character while the field drew it, so Save stored "QA Teste" (iOS 27, Nov 2026).
+            for character in text { field.typeText(String(character)) }
             guard checks else { return }
             if reads(field) == text { return }
         }
