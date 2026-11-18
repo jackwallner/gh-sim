@@ -110,6 +110,28 @@ IPAD_SLOT = 13
 IPAD_PERSONAS = ["ipad-portrait", "ipad-landscape"]
 SLOT_WAIT = 4 * 3600  # seconds to wait for a named slot another run holds (one iPad Pro serves every local gate)
 
+# German guards long strings and comma decimals. In the 22 German runs from Oct 28 to Nov 18 2026 it found 3
+# blockers no other persona saw, at 7 minutes a run, so it reruns only when something it guards changed since
+# its last clean run (strings, view or format code, the journeys, FleetQA) and is carried forward otherwise.
+GERMAN = "german"
+STRINGS_FILE = re.compile(r"\.(xcstrings|strings|stringsdict)$")
+VIEW_LINE = re.compile(
+    r"\b(Text|Label|Button|Toggle|Picker|TextField|SecureField|Stepper|Menu|Link|Section|LabeledContent|"
+    r"navigationTitle|LocalizedStringKey|LocalizedStringResource|NSLocalizedString|localized|"
+    r"HStack|VStack|ZStack|LazyVGrid|LazyHGrid|LazyVStack|LazyHStack|Grid|GridRow|ViewThatFits|"
+    r"frame|padding|font|lineLimit|minimumScaleFactor|fixedSize|layoutPriority|multilineTextAlignment|"
+    r"formatted|NumberFormatter|DateFormatter|MeasurementFormatter|FormatStyle|"
+    r"UILabel|UIButton|NSLayoutConstraint|UIStackView)\b")
+
+# Reduce Motion's own job is the reduce-motion-ignored comparison. Its layout is newcomer's, so every hierarchy
+# oracle under it repeated what newcomer saw on the same screens or caught a one-off (Oct 28 to Nov 18 2026: 14
+# overlaps only it reported, a third of them seen under newcomer in other runs). It now runs the opening
+# journeys only and keeps the findings that can differ with Reduce Motion on.
+REDUCE_MOTION = "reduce-motion"
+REDUCE_MOTION_JOURNEYS = 1  # the first journey in running order: first run and onboarding, the app's own motion
+REDUCE_MOTION_ORACLES = {"crash", "journey-broken", "blank-launch", "still-loading", "never-idle",
+                         "reduce-motion-ignored"}  # plus every motion-* candidate
+
 # simctl's content size reaches an app only once XCUITest first queries it, so
 # launches would render at the default size and then jump. The launch argument
 # makes the app start at the persona's size, as it would on a device.
@@ -811,8 +833,9 @@ def longest_blank(thumbs: list[bytes], first: int, last: int) -> float:
 
 def motion_findings(video: Path, checkpoints: list[dict], started: float, persona: str,
                     system: list[dict] | None = None, home: Path | None = None,
-                    load: list[dict] | None = None) -> tuple[list[dict], dict]:
-    """Scores the persona's video and pins each flicker or jump to the step it happened in."""
+                    load: list[dict] | None = None, runs: list[dict] | None = None) -> tuple[list[dict], dict]:
+    """Scores the persona's video and pins each flicker or jump to the step it happened in. With the
+    journeys' running order (`runs`), the summary also splits the motion by journey."""
     if not video.is_file() or not RECORD60.is_file():
         return [], {}
     sys.path.insert(0, str(RECORD60.parent))
@@ -865,7 +888,8 @@ def motion_findings(video: Path, checkpoints: list[dict], started: float, person
     summary = {"video": str(video), "video_started": started, "entrance_sheets": entrances, "motion_seconds": result.get("motion_seconds"),
                "motion_60fps": result.get("motion_60fps"), "windows": len(result.get("motion_windows", [])),
                "events": result.get("events"), "system_events": ignored,
-               "gaps_over_25ms": result.get("gaps_over_25ms")}
+               "gaps_over_25ms": result.get("gaps_over_25ms"),
+               "journey_motion": journey_motion(result.get("motion_windows", []), runs or [], started)}
     return findings, summary
 
 
@@ -899,17 +923,120 @@ def source_findings(repo: Path) -> list[dict]:
 
 
 def reduce_motion_findings(motion: dict[str, dict]) -> list[dict]:
-    """Reduce Motion should leave far less on-screen movement than the same journeys without it."""
-    base, reduced = motion.get("newcomer"), motion.get("reduce-motion")
-    if not base or not reduced or not base.get("motion_seconds"):
+    """Reduce Motion should leave far less on-screen movement than the same journeys without it. When Reduce
+    Motion ran only the opening journeys, newcomer's motion in those same journeys is the baseline."""
+    base, reduced = motion.get("newcomer"), motion.get(REDUCE_MOTION)
+    if not base or not reduced:
         return []
-    ratio = (reduced.get("motion_seconds") or 0) / base["motion_seconds"]
-    if base["motion_seconds"] < 2 or ratio < 0.8:
+    ran, per_journey = reduced.get("journeys"), base.get("journey_motion") or {}  # journeys: only when a subset ran
+    if not ran:
+        base_seconds, scope = base.get("motion_seconds") or 0, ""
+    elif set(ran) <= set(per_journey):
+        base_seconds, scope = sum(per_journey[j] for j in ran), f" in {', '.join(ran)}"
+    else:
+        return []  # newcomer's motion cannot be split by journey (a shard from before Nov 18 2026)
+    ratio = (reduced.get("motion_seconds") or 0) / base_seconds if base_seconds else 0
+    if base_seconds < 2 or ratio < 0.8:
         return []
-    return [{"oracle": "reduce-motion-ignored", "severity": "P2", "persona": "reduce-motion", "journey": "all",
+    return [{"oracle": "reduce-motion-ignored", "severity": "P2", "persona": REDUCE_MOTION, "journey": "all",
              "checkpoint": "all", "element": "",
-             "detail": f"with Reduce Motion on the journeys still moved for {reduced['motion_seconds']:.1f}s "
-                       f"against {base['motion_seconds']:.1f}s without it ({ratio:.0%}); check which animations ignore it"}]
+             "detail": f"with Reduce Motion on the journeys{scope} still moved for {reduced['motion_seconds']:.1f}s "
+                       f"against {base_seconds:.1f}s without it ({ratio:.0%}); check which animations ignore it"}]
+
+
+def journey_motion(windows: list[dict], runs: list[dict], started: float) -> dict[str, float]:
+    """Seconds of on-screen motion per journey: each motion window belongs to the journey running when it began
+    (the video's lead-in to the first journey, the tail to the last)."""
+    timed = [run for run in runs if run.get("start") is not None]
+    if not timed:
+        return {}
+    out = {run["name"]: 0.0 for run in timed}
+    for window in windows:
+        at = started + window["start"]
+        owner = timed[0]["name"]
+        for run in timed:
+            if at >= run["start"]:
+                owner = run["name"]
+        out[owner] += window.get("duration", 0)
+    return {name: round(seconds, 3) for name, seconds in out.items()}
+
+
+def reduce_motion_tests(repo: Path, config: dict, newcomer_runs: list[dict] | None) -> list[str]:
+    """The opening journeys Reduce Motion runs, as -only-testing ids: from newcomer's running order when it ran
+    first, else the journeys file in XCTest's order (alphabetical). Journeys share data in running order, so a
+    prefix sees exactly what it would in the whole run. Empty when they cannot be told: then all run."""
+    classes = {journey.rsplit("/", 1)[-1]: journey for journey in config["journeys"]}
+    if newcomer_runs and all(run["class"] in classes for run in newcomer_runs):
+        return [f"{classes[run['class']]}/{run['name']}" for run in newcomer_runs[:REDUCE_MOTION_JOURNEYS]]
+    first = config["journeys"][0] if config["journeys"] else ""
+    target, _, name = first.rpartition("/")
+    files = sorted((repo / target).rglob(f"{name}.swift")) if target and (repo / target).is_dir() else []
+    if len(config["journeys"]) != 1 or len(files) != 1:
+        return []
+    tests = sorted(set(re.findall(r"^\s*(?:@\w+\s+)*func (test\w*)\s*\(\s*\)", files[0].read_text(errors="ignore"), re.M)))
+    return [f"{first}/{test}" for test in tests[:REDUCE_MOTION_JOURNEYS]]
+
+
+def reduce_motion_kept(finding: dict) -> bool:
+    """A finding Reduce Motion can cause; the rest repeat newcomer's screens."""
+    oracle = str(finding.get("oracle", ""))
+    return oracle in REDUCE_MOTION_ORACLES or oracle.startswith("motion-")
+
+
+def german_record(repo: Path) -> Path:
+    return STATE / "german" / f"{repo.name}.json"
+
+
+def german_changes(repo: Path, since: str, sha: str) -> list[str]:
+    """Files changed since `since` that German guards: strings, journeys and FleetQA, and Swift app files whose
+    changed lines touch text, layout or number formatting. Unknown history counts as changed."""
+    diff = sh(["git", "-C", str(repo), "diff", "--name-only", since, sha], check=False)
+    if diff.returncode:
+        return [f"history from {since[:12]} unknown"]
+    changed = []
+    for name in diff.stdout.splitlines():
+        if STRINGS_FILE.search(name) or (TEST_CHANGE.search(name) and "UITests/" in name):
+            changed.append(name)
+        elif name.endswith(".swift") and is_app_change(name):
+            lines = sh(["git", "-C", str(repo), "diff", "-U0", since, sha, "--", name], check=False).stdout.splitlines()
+            if any(VIEW_LINE.search(line) for line in lines if line[:1] in "+-" and line[:3] not in ("+++", "---")):
+                changed.append(name)
+    return changed
+
+
+def german_carry(repo: Path, config: dict, sha: str) -> dict | None:
+    """The last clean German run this commit can stand on, or None when German must run: no clean run on record,
+    FleetQA changed since, or something German guards changed."""
+    path = german_record(repo)
+    if not path.is_file():
+        return None
+    record = json.loads(path.read_text())
+    vendored = repo / config["uitests_dir"] / "FleetQA" / "FleetQA.swift"
+    if record.get("fleetqa_sha256") != sha256(vendored) or german_changes(repo, record["sha"], sha):
+        return None
+    return record
+
+
+def note_german(repo: Path, receipt: dict, blockers: list[dict]) -> None:
+    """After a run in which German ran: keep it as the run to carry forward when it was clean, else forget it."""
+    ran = [t for t in receipt.get("tests", []) if t["persona"] == GERMAN]
+    if not ran or receipt.get("dirty"):
+        return
+    path = german_record(repo)
+    blocked = any(GERMAN in str(b.get("persona") or "").split(",") for b in blockers)
+    if blocked or any(t["result"] not in ("Passed", "Skipped") for t in ran):
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"sha": receipt["sha"], "created": receipt.get("created"), "out": receipt.get("out"),
+                                "journeys": len(ran), "fleetqa_sha256": receipt.get("fleetqa_sha256")}, indent=2) + "\n")
+
+
+def carry_german(receipt: dict, carry: dict | None) -> None:
+    """Counts German as run for this receipt on the strength of `carry`, its last clean run."""
+    if carry and GERMAN not in receipt["personas"]:
+        receipt["personas"] = [*receipt["personas"], GERMAN]
+        receipt["carried"] = {GERMAN: carry}
 
 
 # ---------------------------------------------------------------- commands
@@ -958,7 +1085,8 @@ def shard_of(persona: str) -> str:
     return SHARD_OF.get(persona, "a")
 
 
-def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: dict | None = None) -> dict:
+def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: dict | None = None,
+                 carry: dict | None = None) -> dict:
     """One receipt from the shards' partial runs, decided here exactly as a single run would be. reused names
     the shards carried over from an earlier commit's run, which keep the verdict from passing."""
     findings: list[dict] = []
@@ -985,6 +1113,8 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: 
                "out": str(out), "shards": sorted(p["shard"] for p in partials)}
     if reused:
         receipt["reused"] = reused
+    if not any(GERMAN in p["personas"] for p in partials):
+        carry_german(receipt, carry)
     finish(repo, receipt, findings)
     return receipt
 
@@ -1042,11 +1172,25 @@ def cmd_run(args) -> int:
             return run_here(args, host="local")
 
 
+def gate_personas(repo: Path, config: dict, chosen: list[str] | None = None) -> tuple[list[str], list[str]]:
+    """The personas a run owes, in running order, and those skipped because the app is not localized for them.
+    `chosen` (--persona, --quick) replaces the app's full set."""
+    personas = list(chosen) if chosen else list(config["personas"])
+    if not chosen:
+        personas += [p for p in ALWAYS_PERSONAS if p not in personas and p not in config.get("skip", [])]
+    personas = [p for p in personas if p in PERSONAS and (p not in IPAD_PERSONAS or p in ipad_personas(repo, config))]
+    if not chosen:
+        personas += [p for p in ipad_personas(repo, config) if p not in personas]
+    locales = localized(repo)
+    skipped = [p for p in personas if PERSONAS[p].get("needs_locale") and PERSONAS[p]["needs_locale"] not in locales]
+    return [p for p in personas if p not in skipped], skipped
+
+
 def run_here(args, host: str | None = None) -> int:
     shard = getattr(args, "shard", None)
     repo = Path(args.repo).expanduser().resolve()
     if host == "github":
-        receipt = gate_on_github(repo)
+        receipt = gate_on_github(repo, german=getattr(args, "german", False))
         say(f"report {receipt.get('report', 'missing')}")
         return 0 if receipt.get("verdict") == "PASS" else 1
     if (args.persona or args.quick) and os.environ.get("QA_GATE_HOST") == "github":
@@ -1071,17 +1215,17 @@ def run_here(args, host: str | None = None) -> int:
     if stale:
         say("vendored FleetQA.swift is stale; the verdict will block until qa-gate install and a commit")
 
-    personas = args.persona.split(",") if args.persona else (["newcomer"] if args.quick else config["personas"])
-    if not args.persona and not args.quick:
-        personas += [p for p in ALWAYS_PERSONAS if p not in personas and p not in config.get("skip", [])]
-    personas = [p for p in personas if p in PERSONAS and (p not in IPAD_PERSONAS or p in ipad_personas(repo, config))]
-    if not args.persona and not args.quick:
-        personas += [p for p in ipad_personas(repo, config) if p not in personas]
-    locales = localized(repo)
-    skipped = [p for p in personas if PERSONAS[p].get("needs_locale") and PERSONAS[p]["needs_locale"] not in locales]
-    personas = [p for p in personas if p not in skipped]
+    personas, skipped = gate_personas(repo, config, args.persona.split(",") if args.persona
+                                      else (["newcomer"] if args.quick else None))
     if skipped:
         say(f"skipping {', '.join(skipped)}: the app is not localized for it")
+    carry = None
+    if GERMAN in personas and not (args.persona or args.quick or shard or getattr(args, "german", False)):
+        carry = german_carry(repo, config, sha)
+        if carry:
+            personas.remove(GERMAN)
+            say(f"German carried forward from {carry['sha'][:12]}: no strings, view, journey or FleetQA change "
+                f"since (qa-gate run --german runs it)")
     all_personas = list(personas)
     do_unit = not args.persona
     do_upgrade = not args.persona and not args.quick
@@ -1117,6 +1261,7 @@ def run_here(args, host: str | None = None) -> int:
         """Runs every journey for the persona, or only the tests in `again`, kept apart in a rerun folder."""
         persona = {**PERSONAS[name], **config["persona_overrides"].get(name, {})}
         folder = out / name / "rerun" if again else out / name
+        subset = reduce_motion_tests(repo, config, timeline.get("newcomer")) if name == REDUCE_MOTION else []
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir()
         sim.configure(persona)
@@ -1132,12 +1277,13 @@ def run_here(args, host: str | None = None) -> int:
             env["TEST_RUNNER_QA_ORIENTATION"] = persona["orientation"]
         bundle = folder / "result.xcresult"
         if not again:
-            say(f"persona {name}: {persona['about']}")
+            say(f"persona {name}: {persona['about']}"
+                + (f"; the opening journeys only ({', '.join(t.rsplit('/', 1)[-1] for t in subset)})" if subset else ""))
         started = time.time()
         video = folder / "journeys.mp4"
         command = ["xcodebuild", *project, "-destination", f"id={sim.udid}", "test-without-building",
                    "-resultBundlePath", str(bundle), "-collect-test-diagnostics", "never",
-                   *([f"-only-testing:{test}" for test in again] if again else only)]
+                   *([f"-only-testing:{test}" for test in (again or subset)] if (again or subset) else only)]
         logged = log.stat().st_size if log.exists() else 0
         with LoadSampler(folder / "load.jsonl") as sampler:
             if args.no_video or persona.get("video") is False:
@@ -1157,6 +1303,12 @@ def run_here(args, host: str | None = None) -> int:
                                   "failures": ["xcodebuild went silent; the simulator wedged"], "seconds": None})
         persona_points = read_jsonl(folder / "checkpoints.jsonl")
         persona_findings = read_jsonl(folder / "findings.jsonl")
+        if name == REDUCE_MOTION:
+            repeated = [f for f in persona_findings if not reduce_motion_kept(f)]
+            persona_findings = [f for f in persona_findings if reduce_motion_kept(f)]
+            if repeated:
+                (folder / "repeated-findings.jsonl").write_text("".join(json.dumps(f) + "\n" for f in repeated))
+                say(f"  {len(repeated)} layout findings set aside: Reduce Motion draws newcomer's screens")
         passed = sum(t["result"] == "Passed" for t in persona_tests)
         say(f"  {passed}/{len(persona_tests)} journeys passed, {len(persona_points)} checkpoints, "
             f"{len(persona_findings)} raw findings")
@@ -1164,7 +1316,7 @@ def run_here(args, host: str | None = None) -> int:
         if not args.no_video and persona.get("video") is not False:
             found, summary = motion_findings(video, persona_points, started, name,
                                              read_jsonl(folder / "system.jsonl"), folder / "home.png",
-                                             sampler.samples)
+                                             sampler.samples, timeline.get(name))
             if bundle_id and any(f["oracle"] == "blank-launch" for f in found):
                 reference = launch_reference(sim.udid, bundle_id, folder / "home.png", folder)
                 if reference:
@@ -1174,6 +1326,8 @@ def run_here(args, host: str | None = None) -> int:
                 elif reference:
                     found = [judge_against_reference(f, reference) for f in found]
             persona_findings += found
+            if summary and subset:
+                summary["journeys"] = [t.rsplit("/", 1)[-1] for t in subset]
             if summary:
                 say(f"  video: {summary['windows']} motion windows, {summary['events']} flicker/jump candidates "
                     f"({summary['system_events']} in OS launch or between journeys), "
@@ -1256,6 +1410,7 @@ def run_here(args, host: str | None = None) -> int:
                "unit": unit, "upgrade": upgrade,
                "checkpoints": len(checkpoints), "motion": motion, "fleetqa_stale": stale,
                "fleetqa_sha256": sha256(vendored), "out": str(out)}
+    carry_german(receipt, carry)
     return finish(repo, receipt, findings)
 
 
@@ -1503,6 +1658,7 @@ def finish(repo: Path, receipt: dict, findings: list[dict]) -> int:
         decision["verdict"] = "BLOCK"
     if receipt.get("dirty") and decision["verdict"] == "PASS":
         decision["verdict"] = "PASS-UNCOMMITTED"
+    note_german(repo, receipt, decision["blockers"])
     receipt.update({"verdict": decision["verdict"], "blockers": decision["blockers"], "review": decision["review"],
                     "backlog": len(decision["legacy"]), "accepted": len(decision["accepted"]),
                     "decided": now_iso()})
@@ -1581,6 +1737,10 @@ def render(receipt: dict, decision: dict) -> str:
         rows.extend(f"- [{Path(s).name}]({s})" for s in sheets)
     if receipt.get("skipped_personas"):
         rows.extend(["", f"Skipped personas: {', '.join(receipt['skipped_personas'])} (app not localized)."])
+    for name, carry in (receipt.get("carried") or {}).items():
+        rows.extend(["", f"Carried forward: {name} passed clean at {carry['sha'][:12]} ({carry.get('created') or '?'}) "
+                         f"and no strings, view or format code, journey or FleetQA changed since, so it did not run "
+                         f"(`qa-gate run --german` forces it)."])
     return "\n".join(rows) + "\n"
 
 
@@ -1612,13 +1772,16 @@ def cmd_selftest(args) -> int:
         folder = out / name
         folder.mkdir()
         run_tests(["xcodebuild", *project, "-destination", f"id={sim.udid}", "test-without-building",
-                   "-resultBundlePath", str(folder / "result.xcresult"), "-collect-test-diagnostics", "never"],
+                   "-resultBundlePath", str(folder / "result.xcresult"), "-collect-test-diagnostics", "never",
+                   "-only-testing:QAControlUITests/FleetQAControlUITests"],
                   control, {**os.environ, "TEST_RUNNER_QA_OUTPUT_DIR": str(folder), "TEST_RUNNER_QA_PERSONA": name, **extra}, log)
         return test_results(folder / "result.xcresult", name)
 
     tests = []
     with Sim("qa-selftest", None, log) as sim:
         tests += run_control(sim, "phone", {})
+        say("checking the Reduce Motion comparison on the motion plant")
+        motion_problems = selftest_reduce_motion(sim, control, project, out, log)
     # The iPad capture is turned 90 degrees in landscape; every OCR oracle must still fire on it.
     with Sim("qa-selftest-ipad", IPAD_SLOT, log) as sim:
         for name, orientation in (("ipad-portrait", "portrait"), ("ipad-landscape", "landscape")):
@@ -1626,12 +1789,63 @@ def cmd_selftest(args) -> int:
     for test in tests:
         print(f"  {test['result']:7} {test['persona']:15} {test['name']}" + (f": {test['failures'][0][:300]}" if test["failures"] else ""))
     expected = 3 * len(re.findall(r"func test\w+", (control / "QAControlUITests" / "FleetQAControlUITests.swift").read_text()))
-    ok = len(tests) == expected and all(t["result"] == "Passed" for t in tests)
+    for problem in motion_problems:
+        print(f"  FAILED  reduce-motion   {problem}")
+    ok = len(tests) == expected and all(t["result"] == "Passed" for t in tests) and not motion_problems
     if ok:
         (STATE / "selftest").mkdir(parents=True, exist_ok=True)
         (STATE / "selftest" / f"{sha256(FLEETQA)}.ok").write_text(now_iso() + "\n")
     print(f"selftest {'PASS' if ok else 'FAIL'} for FleetQA {sha256(FLEETQA)[:12]} (phone, iPad portrait, iPad landscape); log {log}")
     return 0 if ok else 1
+
+
+def selftest_reduce_motion(sim: "Sim", control: Path, project: list[str], out: Path, log: Path) -> list[str]:
+    """Records the control app's motion plant with Reduce Motion off, then on with the plant ignoring and honoring
+    it, the way a gate runs the trimmed persona. Returns what went wrong: none when reduce-motion-ignored fires on
+    the ignoring plant only and Reduce Motion ran the opening journey alone."""
+    config = {"journeys": ["QAControlUITests/ReduceMotionControlUITests"]}
+    motion: dict[str, dict] = {}
+    newcomer_runs: list[dict] | None = None
+    for name, persona, mode in (("newcomer", "newcomer", "ignores"), ("ignores", REDUCE_MOTION, "ignores"),
+                                ("honors", REDUCE_MOTION, "honors")):
+        folder = out / f"motion-{name}"
+        folder.mkdir()
+        sim.configure(PERSONAS[persona])
+        sh(["xcrun", "simctl", "uninstall", sim.udid, "com.jackwallner.qacontrol"], check=False, log=log,
+           timeout=SIM_CALL_SECONDS)
+        sh(["xcrun", "simctl", "io", sim.udid, "screenshot", str(folder / "home.png")], check=False, log=log)
+        subset = reduce_motion_tests(control, config, newcomer_runs) if persona == REDUCE_MOTION else []
+        env = {**os.environ, "TEST_RUNNER_QA_OUTPUT_DIR": str(folder), "TEST_RUNNER_QA_PERSONA": persona,
+               "TEST_RUNNER_QA_LAUNCH_ENVIRONMENT": json.dumps({"QA_CONTROL_MOTION": mode})}
+        logged = log.stat().st_size if log.exists() else 0
+        with Recorder(sim.udid, folder / "journeys.mp4") as recorder:
+            started = recorder.started
+            run_tests(["xcodebuild", *project, "-destination", f"id={sim.udid}", "test-without-building",
+                       "-resultBundlePath", str(folder / "result.xcresult"), "-collect-test-diagnostics", "never",
+                       *[f"-only-testing:{t}" for t in (subset or config["journeys"])]], control, env, log)
+        with log.open(errors="ignore") as stream:
+            stream.seek(logged)
+            runs = journey_runs(stream.read())
+        if persona == "newcomer":
+            newcomer_runs = runs
+        _, summary = motion_findings(folder / "journeys.mp4", read_jsonl(folder / "checkpoints.jsonl"), started,
+                                     persona, read_jsonl(folder / "system.jsonl"), folder / "home.png", None, runs)
+        if summary and subset:
+            summary["journeys"] = [t.rsplit("/", 1)[-1] for t in subset]
+        motion[name] = summary or {}
+    sim.configure(PERSONAS["newcomer"])
+    problems = []
+    if motion["ignores"].get("journeys") != ["test1MotionPlant"]:
+        problems.append(f"Reduce Motion ran {motion['ignores'].get('journeys') or 'every journey'}, not test1MotionPlant alone")
+    ignored = reduce_motion_findings({"newcomer": motion["newcomer"], REDUCE_MOTION: motion["ignores"]})
+    honored = reduce_motion_findings({"newcomer": motion["newcomer"], REDUCE_MOTION: motion["honors"]})
+    seconds = {name: motion[name].get("motion_seconds") for name in motion}
+    say(f"  motion seconds {seconds}; newcomer by journey {motion['newcomer'].get('journey_motion')}")
+    if not ignored:
+        problems.append(f"reduce-motion-ignored did not fire on the plant that ignores Reduce Motion ({seconds})")
+    if honored:
+        problems.append(f"reduce-motion-ignored fired on the plant that honors Reduce Motion: {honored[0]['detail']}")
+    return problems
 
 
 def cmd_verdict(args) -> int:
@@ -1779,6 +1993,12 @@ def covered_journeys(tests: list[dict]) -> set[tuple[str, str]]:
     for persona in {t["persona"] for t in tests}:
         if all(t["result"] in ("Passed", "Skipped") for t in tests if t["persona"] == persona):
             covered.add((persona, "*"))
+    # Reduce Motion runs the opening journeys only and draws newcomer's screens: newcomer passing a later
+    # journey covers what Reduce Motion reported there before it was trimmed.
+    trimmed = {t["name"] for t in tests if t["persona"] == REDUCE_MOTION}
+    if trimmed:
+        covered |= {(REDUCE_MOTION, name) for persona, name in list(covered)
+                    if persona == "newcomer" and name != "*" and name not in trimmed}
     return covered
 
 
@@ -2131,9 +2351,10 @@ def gate_host(repo: Path, overflow: bool = False) -> str:
     return "local"
 
 
-def gate_on_github(repo: Path, previous: dict | None = None) -> dict:
+def gate_on_github(repo: Path, previous: dict | None = None, german: bool = False) -> dict:
     """Runs the journeys on a free GitHub Mac (~/bin/gh-gate) and files the run as if it had run here. With a
-    previous run, only the shards that blocked it run again and the others are carried over."""
+    previous run, only the shards that blocked it run again and the others are carried over. German is carried
+    forward from its last clean run, as on the Air, unless `german` forces it."""
     sha = git(repo, "rev-parse", "HEAD")
     landing = repo / "build" / "qa" / "gh-gate"
     rerun = shards_to_rerun(previous) if previous else list(SHARDS)
@@ -2145,6 +2366,15 @@ def gate_on_github(repo: Path, previous: dict | None = None) -> dict:
         reused = {s: json.loads((old / f"partial-{s}.json").read_text()) for s in SHARDS if s not in rerun}
         say(f"regating shard(s) {', '.join(rerun)} only; {', '.join(reused)} carried over from {previous['sha'][:12]}")
     env = {**os.environ, "GH_GATE_SHARDS": " ".join(rerun)}
+    config = load_config(repo)
+    personas, _ = gate_personas(repo, config)
+    carry = None
+    if GERMAN in personas and not german and "GH_GATE_PERSONAS" not in os.environ:
+        carry = german_carry(repo, config, sha)
+    if carry:
+        # Every shard runs the personas it owns from this list, so German is left out on all of them.
+        env["GH_GATE_PERSONAS"] = ",".join(p for p in personas if p != GERMAN)
+        say(f"German carried forward from {carry['sha'][:12]}: no strings, view, journey or FleetQA change since")
     fetched = subprocess.run(["gh-gate", str(repo), str(landing), upgrade_from(repo) or ""], text=True, env=env)
     if fetched.returncode:
         say("gate run on GitHub failed")
@@ -2154,7 +2384,7 @@ def gate_on_github(repo: Path, previous: dict | None = None) -> dict:
         shutil.rmtree(out)
     shards = sorted(landing.glob("result-*/run/partial.json"))
     if shards:
-        return import_shards(repo, landing, out, sha, shards, reused, previous["sha"] if previous else "")
+        return import_shards(repo, landing, out, sha, shards, reused, previous["sha"] if previous else "", carry)
     meta = json.loads((landing / "meta.json").read_text())
     shutil.move(str(landing / "run"), str(out))
     remote = f"{meta['workspace']}/build/qa/{sha[:12]}"
@@ -2194,7 +2424,7 @@ def shards_to_rerun(previous: dict) -> list[str]:
 
 
 def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[Path],
-                  reused: dict[str, dict] | None = None, reused_sha: str = "") -> dict:
+                  reused: dict[str, dict] | None = None, reused_sha: str = "", carry: dict | None = None) -> dict:
     """Moves each GitHub shard's run into one run folder here, then merges and decides it. reused holds the
     partial runs of shards carried over from an earlier commit, kept beside the new ones for the next regate."""
     out.mkdir(parents=True)
@@ -2217,7 +2447,7 @@ def import_shards(repo: Path, landing: Path, out: Path, sha: str, shards: list[P
             shutil.move(str(item), str(out / name))
     shutil.rmtree(landing, ignore_errors=True)
     carried = {"shards": sorted(reused), "sha": reused_sha} if reused else None
-    receipt = merge_shards(repo, out, sha, partials, carried)
+    receipt = merge_shards(repo, out, sha, partials, carried, carry)
     (STATE / "last").mkdir(parents=True, exist_ok=True)
     (STATE / "last" / f"{repo.name}.json").write_text(json.dumps({"out": str(out)}) + "\n")
     say(f"GitHub gate verdict {receipt.get('verdict')} at {sha[:12]} (shards {', '.join(receipt['shards'])})")
@@ -2728,6 +2958,7 @@ def main() -> int:
     p = sub.add_parser("install"); p.add_argument("repo"); p.set_defaults(fn=cmd_install)
     p = sub.add_parser("run"); p.add_argument("repo"); p.add_argument("--quick", action="store_true")
     p.add_argument("--persona"); p.add_argument("--no-video", action="store_true")
+    p.add_argument("--german", action="store_true", help="run German even when nothing it guards changed")
     p.add_argument("--shard", choices=(*SHARDS, RECHECK)); p.set_defaults(fn=cmd_run)
     p = sub.add_parser("verdict"); p.add_argument("repo"); p.set_defaults(fn=cmd_verdict)
     p = sub.add_parser("selftest"); p.set_defaults(fn=cmd_selftest)

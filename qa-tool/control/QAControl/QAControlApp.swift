@@ -12,6 +12,7 @@ struct QAControlApp: App {
             case "broken": Flow(broken: true)
             case "blank": Color.white.ignoresSafeArea()
             case "tabs": Tabs()
+            case "motion": MotionPlant()
             default: Flow(broken: false)
             }
         }

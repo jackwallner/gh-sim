@@ -273,6 +273,8 @@ struct Leaf {
     let identifier: String
     let frame: CGRect
     let inScroll: Bool
+    /// Inside a system tab bar, toolbar or navigation bar, which floats over scrolling content by design.
+    var inBar = false
 
     var name: String { identifier.isEmpty ? label : identifier }
 }
@@ -281,6 +283,7 @@ struct Leaf {
 enum Layout {
     static let textual: Set<XCUIElement.ElementType> = [.staticText, .button, .textField, .secureTextField, .switch, .link]
     static let scrolling: Set<XCUIElement.ElementType> = [.scrollView, .collectionView, .table, .webView]
+    static let bars: Set<XCUIElement.ElementType> = [.tabBar, .toolbar, .navigationBar]
 
     struct Result {
         var final: [Leaf]
@@ -298,8 +301,9 @@ enum Layout {
         let window = root.children.first { $0.elementType == .window }?.frame ?? root.frame
         var seen: [String: Int] = [:]
         var out: [Leaf] = []
-        func walk(_ node: XCUIElementSnapshot, inScroll: Bool) {
+        func walk(_ node: XCUIElementSnapshot, inScroll: Bool, inBar: Bool = false) {
             let scroll = inScroll || scrolling.contains(node.elementType)
+            let bar = inBar || bars.contains(node.elementType)
             if node.children.isEmpty || node.elementType == .button || node.elementType == .switch {
                 let frame = node.frame
                 let label = node.label
@@ -309,11 +313,11 @@ enum Layout {
                     let n = seen[base, default: 0]
                     seen[base] = n + 1
                     out.append(Leaf(key: "\(base)#\(n)", type: node.elementType, label: label,
-                                    identifier: node.identifier, frame: frame, inScroll: scroll))
+                                    identifier: node.identifier, frame: frame, inScroll: scroll, inBar: bar))
                 }
                 return
             }
-            for child in node.children { walk(child, inScroll: scroll) }
+            for child in node.children { walk(child, inScroll: scroll, inBar: bar) }
         }
         walk(root, inScroll: false)
         return (out, window.width, window.height)
@@ -444,7 +448,8 @@ enum Layout {
     /// Two texts, or two buttons, drawn over each other.
     static func overlaps(_ app: XCUIApplication, _ leaves: [Leaf], _ rendered: [Render.Line], context: QA.Context) {
         let candidates = leaves.filter { $0.type == .staticText || $0.type == .button }
-        var reported = Set<String>()
+        var seen = Set<String>()
+        var found: [(a: Leaf, b: Leaf, region: CGRect, share: CGFloat, pair: String)] = []
         // One live lookup per element: a leaf that overlaps many others is asked about once, not once per pair.
         var shown: [String: Bool] = [:]
         func isShown(_ leaf: Leaf) -> Bool {
@@ -460,34 +465,54 @@ enum Layout {
                 if a.frame.contains(b.frame) || b.frame.contains(a.frame) { continue }
                 let smaller = min(a.frame.width * a.frame.height, b.frame.width * b.frame.height)
                 guard overlap.width * overlap.height > 0.2 * smaller else { continue }
+                // A system tab bar, toolbar or navigation bar floats over the list under it by
+                // design, and its glass lets the rows show through (Keyring's garage cards under
+                // its tab bar were most of the fleet's overlap findings, Nov 2026).
+                if a.inBar != b.inBar, (a.inBar ? b : a).inScroll { continue }
                 let pair = [a.name, b.name].sorted().joined(separator: " / ")
-                guard !reported.contains(pair) else { continue }
-                // TabView keeps every tab in the accessibility tree at full size;
-                // only a pair the user can actually see is an overlap.
-                // Both must actually be drawn there (TabView keeps hidden tabs in the
-                // tree and even reports them hittable), and the text must read badly:
-                // two labels whose frames touch but that both read cleanly are padding.
-                // Text stacked on text often reads as one garbled line ("BOSSTVADELPARAPICK"),
-                // so neither label is found: that counts too, when something is drawn in
-                // the overlap that no cleanly read element accounts for.
-                let readA = Render.presence(a, rendered), readB = Render.presence(b, rendered)
-                // Partly drawn counts only the words each label does not share with the
-                // other, or a line covered by a card reads as drawn through the card's own words.
-                let ownA = Render.presence(a, rendered, excluding: b.label)
-                let ownB = Render.presence(b, rendered, excluding: a.label)
-                let partly = ownA >= 0.3 && ownB >= 0.3 && min(readA, readB) < 0.9
-                // Stacked text that reads as one garbled line still carries letters of both labels; text
-                // of a hidden tab under an unrelated visible line does not, and asking the app whether
-                // each of those is shown costs seconds per element.
-                let garbled = max(readA, readB) < 0.9 && Render.unexplained(in: overlap, rendered, leaves: leaves)
-                    && Render.related(overlap, rendered, a, b)
-                guard partly || garbled, isShown(a), isShown(b) else { continue }
-                reported.insert(pair)
-                QA.record(context, "overlap", "P1", pair,
-                          String(format: "%@ \"%@\" overlaps \"%@\" by %.0f%%", typeName(a.type), a.name, b.name,
-                                 100 * overlap.width * overlap.height / smaller))
+                guard !seen.contains(pair), drawnOver(a, b, overlap, rendered, leaves), isShown(a), isShown(b) else { continue }
+                seen.insert(pair)
+                found.append((a, b, overlap, overlap.width * overlap.height / smaller, pair))
             }
         }
+        guard !found.isEmpty else { return }
+        // A frame caught mid-transition, or glass still blending what scrolled under it, reads
+        // differently a moment later. Only an overlap that a second capture still shows is drawn.
+        usleep(700_000)
+        let again = Render.read(QA.capture(app))
+        for item in found where drawnOver(item.a, item.b, item.region, again, leaves) {
+            QA.record(context, "overlap", "P1", item.pair,
+                      String(format: "%@ \"%@\" overlaps \"%@\" by %.0f%%", typeName(item.a.type), item.a.name,
+                             item.b.name, 100 * item.share))
+        }
+    }
+
+    /// Whether the screenshot shows two overlapping elements actually drawn over each other.
+    static func drawnOver(_ a: Leaf, _ b: Leaf, _ overlap: CGRect, _ rendered: [Render.Line], _ leaves: [Leaf]) -> Bool {
+        // Scrolling content passing under a pinned element (a bottom button bar, a header) is
+        // hidden there when the pinned one reads cleanly and none of the content's own words are
+        // drawn inside the overlap: the list goes on under the bar, the user scrolls to it.
+        // Content that shows through an unbacked pinned label still has its words there.
+        if a.inScroll != b.inScroll {
+            let (content, pinned) = a.inScroll ? (a, b) : (b, a)
+            if Render.presence(pinned, rendered) >= 0.9,
+               !Render.drawnInside(overlap, rendered, content, excluding: pinned.label) { return false }
+        }
+        // Both must actually be drawn there (TabView keeps hidden tabs in the tree and even
+        // reports them hittable), and the text must read badly: two labels whose frames touch
+        // but that both read cleanly are padding. Text stacked on text often reads as one
+        // garbled line ("BOSSTVADELPARAPICK"), so neither label is found: that counts too,
+        // when something is drawn in the overlap that no cleanly read element accounts for.
+        let readA = Render.presence(a, rendered), readB = Render.presence(b, rendered)
+        // Partly drawn counts only the words each label does not share with the
+        // other, or a line covered by a card reads as drawn through the card's own words.
+        let ownA = Render.presence(a, rendered, excluding: b.label)
+        let ownB = Render.presence(b, rendered, excluding: a.label)
+        if ownA >= 0.3 && ownB >= 0.3 && min(readA, readB) < 0.9 { return true }
+        // Stacked text that reads as one garbled line still carries letters of both labels; text
+        // of a hidden tab under an unrelated visible line does not.
+        return max(readA, readB) < 0.9 && Render.unexplained(in: overlap, rendered, leaves: leaves)
+            && Render.related(overlap, rendered, a, b)
     }
 
     /// Resolves a snapshot leaf back to a live element and asks whether a tap
@@ -785,6 +810,19 @@ enum Render {
         guard !wanted.isEmpty else { return 1 }
         let drawn = lines.filter { leaf.frame.insetBy(dx: -4, dy: -4).intersects($0.frame) }.map { $0.text.lowercased() }.joined(separator: " ")
         return Double(wanted.filter { drawn.contains($0) }.count) / Double(wanted.count)
+    }
+
+    /// True when any of the element's own words (not shared with `other`) is drawn with its
+    /// middle inside `region`. A label with no words of its own cannot be told apart, so it counts.
+    static func drawnInside(_ region: CGRect, _ lines: [Line], _ leaf: Leaf, excluding other: String) -> Bool {
+        let shared = Set(words(other))
+        let wanted = Set(words(leaf.label)).subtracting(shared)
+        guard !wanted.isEmpty else { return true }
+        let area = region.insetBy(dx: -2, dy: -2)
+        let drawn = lines.flatMap { $0.words.isEmpty ? [$0] : $0.words }
+            .filter { area.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }
+            .map { $0.text.lowercased() }.joined(separator: " ")
+        return wanted.contains { drawn.contains($0) }
     }
 
     /// True when text drawn in `region` shares at least two three-letter runs with either label.
