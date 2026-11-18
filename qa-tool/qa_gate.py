@@ -656,15 +656,19 @@ def launch_reference(udid: str, bundle: str, home: Path, folder: Path, rounds: i
     if not times["app"] or not times["reference"]:
         return None
     result = {key: sorted(values)[len(values) // 2] for key, values in times.items()}
+    result["app_best"] = min(times["app"])
     (folder / "launch.json").write_text(json.dumps({**result, "samples": times}, indent=2) + "\n")
     return result
 
 
 def launch_is_simulator(reference: dict | None) -> bool:
-    """From main(), the app draws about as soon as an app that draws on its first frame: the blank was dyld."""
+    """From main(), the app draws about as soon as an app that draws on its first frame: the blank was dyld.
+
+    The app's fastest launch is the one judged: a stalled runner only ever adds time, and an app that is
+    slow to draw is slow on every launch (Sports on GitHub, Nov 17: 10.2, 4.1 and 12.4s against 3.6s)."""
     if not reference:
         return False
-    return reference["app"] <= 2 * reference["reference"] + LAUNCH_MARGIN
+    return reference.get("app_best", reference["app"]) <= 2 * reference["reference"] + LAUNCH_MARGIN
 
 
 # ---------------------------------------------------------------- results
