@@ -481,7 +481,7 @@ enum Layout {
         // Frames are read again with it: a card that lands late moves the pair (the control
         // app's broken screen does), and the old frames would point at the wrong pixels.
         usleep(700_000)
-        guard let fresh = leaves(app)?.leaves else { return }
+        guard let fresh = Layout.leaves(app)?.leaves else { return }
         let again = Render.read(QA.capture(app))
         let now = Dictionary(fresh.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
         for item in found {
