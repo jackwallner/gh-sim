@@ -250,8 +250,9 @@ struct UnderBars: View {
         .overlay(alignment: .topLeading) {
             Button {} label: { Text("BEST VALUE PLAN").font(.headline) }
                 .buttonStyle(.plain)
-                // Clear of the row's middle, so a tap still reaches both: drawn over, not hidden.
-                .offset(x: 134, y: 4)
+                // Over most of the row's label but clear of its middle, so a tap still reaches both: drawn
+                // over, not hidden. At 134 pt the phone's smaller overlap read cleanly half the time.
+                .offset(x: 118, y: 4)
         }
         .overlay(alignment: .top) {
             Button {} label: {

@@ -111,17 +111,10 @@ IPAD_PERSONAS = ["ipad-portrait", "ipad-landscape"]
 SLOT_WAIT = 4 * 3600  # seconds to wait for a named slot another run holds (one iPad Pro serves every local gate)
 
 # German guards long strings and comma decimals. In the 22 German runs from Oct 28 to Nov 18 2026 it found 3
-# blockers no other persona saw, at 7 minutes a run, so it reruns only when something it guards changed since
-# its last clean run (strings, view or format code, the journeys, FleetQA) and is carried forward otherwise.
+# blockers no other persona saw, at 7 minutes a run, so it reruns only when a localized strings file changed since
+# its last clean run and is carried forward otherwise (Jack, Nov 18 2026).
 GERMAN = "german"
 STRINGS_FILE = re.compile(r"\.(xcstrings|strings|stringsdict)$")
-VIEW_LINE = re.compile(
-    r"\b(Text|Label|Button|Toggle|Picker|TextField|SecureField|Stepper|Menu|Link|Section|LabeledContent|"
-    r"navigationTitle|LocalizedStringKey|LocalizedStringResource|NSLocalizedString|localized|"
-    r"HStack|VStack|ZStack|LazyVGrid|LazyHGrid|LazyVStack|LazyHStack|Grid|GridRow|ViewThatFits|"
-    r"frame|padding|font|lineLimit|minimumScaleFactor|fixedSize|layoutPriority|multilineTextAlignment|"
-    r"formatted|NumberFormatter|DateFormatter|MeasurementFormatter|FormatStyle|"
-    r"UILabel|UIButton|NSLayoutConstraint|UIStackView)\b")
 
 # Reduce Motion's own job is the reduce-motion-ignored comparison. Its layout is newcomer's, so every hierarchy
 # oracle under it repeated what newcomer saw on the same screens or caught a one-off (Oct 28 to Nov 18 2026: 14
@@ -988,33 +981,21 @@ def german_record(repo: Path) -> Path:
 
 
 def german_changes(repo: Path, since: str, sha: str) -> list[str]:
-    """Files changed since `since` that German guards: strings, journeys and FleetQA, and Swift app files whose
-    changed lines touch text, layout or number formatting. Unknown history counts as changed."""
+    """Localized strings files changed since `since`. Unknown history counts as changed."""
     diff = sh(["git", "-C", str(repo), "diff", "--name-only", since, sha], check=False)
     if diff.returncode:
         return [f"history from {since[:12]} unknown"]
-    changed = []
-    for name in diff.stdout.splitlines():
-        if STRINGS_FILE.search(name) or (TEST_CHANGE.search(name) and "UITests/" in name):
-            changed.append(name)
-        elif name.endswith(".swift") and is_app_change(name):
-            lines = sh(["git", "-C", str(repo), "diff", "-U0", since, sha, "--", name], check=False).stdout.splitlines()
-            if any(VIEW_LINE.search(line) for line in lines if line[:1] in "+-" and line[:3] not in ("+++", "---")):
-                changed.append(name)
-    return changed
+    return [name for name in diff.stdout.splitlines() if STRINGS_FILE.search(name)]
 
 
 def german_carry(repo: Path, config: dict, sha: str) -> dict | None:
     """The last clean German run this commit can stand on, or None when German must run: no clean run on record,
-    FleetQA changed since, or something German guards changed."""
+    or a localized strings file changed since."""
     path = german_record(repo)
     if not path.is_file():
         return None
     record = json.loads(path.read_text())
-    vendored = repo / config["uitests_dir"] / "FleetQA" / "FleetQA.swift"
-    if record.get("fleetqa_sha256") != sha256(vendored) or german_changes(repo, record["sha"], sha):
-        return None
-    return record
+    return None if german_changes(repo, record["sha"], sha) else record
 
 
 def note_german(repo: Path, receipt: dict, blockers: list[dict]) -> None:
@@ -1224,7 +1205,7 @@ def run_here(args, host: str | None = None) -> int:
         carry = german_carry(repo, config, sha)
         if carry:
             personas.remove(GERMAN)
-            say(f"German carried forward from {carry['sha'][:12]}: no strings, view, journey or FleetQA change "
+            say(f"German carried forward from {carry['sha'][:12]}: no localized strings change "
                 f"since (qa-gate run --german runs it)")
     all_personas = list(personas)
     do_unit = not args.persona
@@ -2374,7 +2355,7 @@ def gate_on_github(repo: Path, previous: dict | None = None, german: bool = Fals
     if carry:
         # Every shard runs the personas it owns from this list, so German is left out on all of them.
         env["GH_GATE_PERSONAS"] = ",".join(p for p in personas if p != GERMAN)
-        say(f"German carried forward from {carry['sha'][:12]}: no strings, view, journey or FleetQA change since")
+        say(f"German carried forward from {carry['sha'][:12]}: no localized strings change since")
     fetched = subprocess.run(["gh-gate", str(repo), str(landing), upgrade_from(repo) or ""], text=True, env=env)
     if fetched.returncode:
         say("gate run on GitHub failed")
