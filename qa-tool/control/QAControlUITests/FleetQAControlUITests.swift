@@ -78,4 +78,21 @@ final class FleetQAControlUITests: XCTestCase {
         let contrast = QA.lastFindings.filter { $0.oracle == "a11y-contrast" }
         XCTAssertTrue(contrast.isEmpty, "clean paywall has contrast findings: \(contrast.map(\.detail))")
     }
+
+    /// The journey helpers on every device the selftest runs: a tab found and opened
+    /// outside `tabBars` on the iPad, a field and button reached below the fold, and
+    /// a field that already holds a name replaced, not appended to.
+    func testJourneyHelpers() {
+        let app = XCUIApplication()
+        QA.launch(app, environment: ["QA_CONTROL_SCREEN": "tabs"])
+        XCTAssertTrue(app.staticTexts["Nothing saved"].waitForExistence(timeout: 20))
+        QA.openTab(app, "Settings", "Einstellungen")
+        let field = app.textFields["settings.name"]
+        QA.type("QA Tester", into: field, in: app)
+        XCTAssertEqual(QA.reads(field), "QA Tester")
+        QA.tap(QA.button(app, "Save", "Sichern"), in: app, "Save")
+        QA.openTab(app, "Today", "Heute")
+        XCTAssertTrue(app.staticTexts["Saved QA Tester"].waitForExistence(timeout: 10),
+                      "Save did not reach Today; QA.tap or QA.openTab missed")
+    }
 }

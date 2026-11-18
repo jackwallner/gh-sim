@@ -11,6 +11,7 @@ struct QAControlApp: App {
             switch ProcessInfo.processInfo.environment["QA_CONTROL_SCREEN"] {
             case "broken": Flow(broken: true)
             case "blank": Color.white.ignoresSafeArea()
+            case "tabs": Tabs()
             default: Flow(broken: false)
             }
         }
@@ -160,6 +161,53 @@ struct BrokenScreen: View {
         .task {
             try? await Task.sleep(for: .seconds(3))
             lateCard = true
+        }
+    }
+}
+
+/// The journey helpers' control: two tabs, and a Settings list whose name field
+/// (already holding a name) and Save button start below the fold. On the iPad the
+/// tabs are the floating bar or the sidebar, which `tabBars` does not see.
+struct Tabs: View {
+    @State private var saved = ""
+
+    var body: some View {
+        if #available(iOS 18.0, *) {
+            TabView {
+                Tab("Today", systemImage: "sun.max") { today }
+                Tab("Settings", systemImage: "gear") { settings }
+            }
+            .tabViewStyle(.sidebarAdaptable)
+        } else {
+            TabView {
+                today.tabItem { Label("Today", systemImage: "sun.max") }
+                settings.tabItem { Label("Settings", systemImage: "gear") }
+            }
+        }
+    }
+
+    private var today: some View {
+        NavigationStack {
+            Text(saved.isEmpty ? "Nothing saved" : "Saved \(saved)").navigationTitle("Today")
+        }
+    }
+
+    private var settings: some View {
+        NavigationStack {
+            SettingsList(saved: $saved).navigationTitle("Settings")
+        }
+    }
+}
+
+struct SettingsList: View {
+    @Binding var saved: String
+    @State private var name = "Jack"
+
+    var body: some View {
+        List {
+            ForEach(1...40, id: \.self) { Text("Setting \($0)") }
+            TextField("Name", text: $name).accessibilityIdentifier("settings.name")
+            Button("Save") { saved = name }
         }
     }
 }
