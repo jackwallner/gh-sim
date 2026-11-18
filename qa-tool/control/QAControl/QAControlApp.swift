@@ -220,8 +220,8 @@ struct SettingsList: View {
 /// drawn over the first row shows the row through it: an overlap.
 struct UnderBars: View {
     private let rows = (1...30).map { "Row \($0): every sunrise score for the week ahead" }
-    /// Rows are 60 pt tall from the top of the list, so the bar's top edge at 280 pt
-    /// crosses row 4 (240 to 300) under its first line.
+    /// Rows sit 60 pt apart from the top of the list and draw about 49 pt of text, so the
+    /// bar's top edge at 270 pt crosses row 4 (240 to 289) below its first line and middle.
     private let pitch: CGFloat = 60
 
     var body: some View {
@@ -250,7 +250,8 @@ struct UnderBars: View {
         .overlay(alignment: .topLeading) {
             Button {} label: { Text("BEST VALUE PLAN").font(.headline) }
                 .buttonStyle(.plain)
-                .offset(x: 36, y: 4)
+                // Clear of the row's middle, so a tap still reaches both: drawn over, not hidden.
+                .offset(x: 134, y: 4)
         }
         .overlay(alignment: .top) {
             Button {} label: {
@@ -260,7 +261,7 @@ struct UnderBars: View {
             }
             .buttonStyle(.plain)
             .frame(height: 2 * pitch)
-            .offset(y: 4 * pitch + 40)
+            .offset(y: 4 * pitch + 30)
         }
     }
 }
