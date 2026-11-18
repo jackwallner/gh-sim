@@ -821,15 +821,16 @@ enum Render {
 
     /// True when any of the element's own words (not shared with `other`) is drawn with its
     /// middle inside `region`. A label with no words of its own cannot be told apart, so it counts.
+    /// Whole words only: Baby Docs' "thing" is not drawn just because its pinned note says "Nothing".
     static func drawnInside(_ region: CGRect, _ lines: [Line], _ leaf: Leaf, excluding other: String) -> Bool {
         let shared = Set(words(other))
         let wanted = Set(words(leaf.label)).subtracting(shared)
         guard !wanted.isEmpty else { return true }
         let area = region.insetBy(dx: -2, dy: -2)
-        let drawn = lines.flatMap { $0.words.isEmpty ? [$0] : $0.words }
+        let drawn = Set(lines.flatMap { $0.words.isEmpty ? [$0] : $0.words }
             .filter { area.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) }
-            .map { $0.text.lowercased() }.joined(separator: " ")
-        return wanted.contains { drawn.contains($0) }
+            .flatMap { words($0.text) })
+        return !wanted.isDisjoint(with: drawn)
     }
 
     /// True when text drawn in `region` shares at least two three-letter runs with either label.
