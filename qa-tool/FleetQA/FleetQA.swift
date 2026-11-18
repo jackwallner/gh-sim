@@ -1045,3 +1045,150 @@ enum Paywall {
                          loudest.line.text, loudest.line.frame.height, billed.line.text, billed.line.frame.height))
     }
 }
+
+// MARK: - Journey helpers: the steps every journey repeats, done once for every device
+
+/// Journeys broke most often on the same few steps, each app solving them again
+/// (Oct 28 to Nov 18 2026): a tab looked up through `tabBars`, which the iPad's
+/// floating bar and sidebar are not in; a tap on a control large text had pushed
+/// below the fold or under a floating tab bar; a tap on the unfolded Duo's tab
+/// capsule that did not select it; text typed into a field that still held the
+/// old value, or that never took focus. These helpers do each step one way that
+/// works on the phone, the Duo and the iPad in both orientations.
+extension QA {
+    /// A tab by its label: English first, then the German one for the german persona
+    /// (`QA.tab(app, "Today", "Heute")`). Looks in the iPhone tab bar first, then at
+    /// any button or cell, which covers the iPad's floating bar and sidebar and the
+    /// Duo's capsule.
+    static func tab(_ app: XCUIApplication, _ labels: String...) -> XCUIElement {
+        tab(app, labels)
+    }
+
+    static func tab(_ app: XCUIApplication, _ labels: [String]) -> XCUIElement {
+        let named = NSPredicate(format: "label IN %@ OR identifier IN %@", labels, labels)
+        let inBar = app.tabBars.buttons.matching(named).firstMatch
+        if inBar.exists { return inBar }
+        let kinds = NSPredicate(format: "elementType IN %@", [XCUIElement.ElementType.button.rawValue,
+                                                               XCUIElement.ElementType.cell.rawValue])
+        return app.descendants(matching: .any)
+            .matching(NSCompoundPredicate(andPredicateWithSubpredicates: [kinds, named])).firstMatch
+    }
+
+    /// Opens a tab and returns it. Waits for the tab, taps it, and if it does not
+    /// read as selected presses its centre (a tap can miss the unfolded Duo's capsule).
+    /// The journey still asserts the screen it expects next.
+    @discardableResult
+    static func openTab(_ app: XCUIApplication, _ labels: String..., timeout: TimeInterval = 20,
+                        file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        var button = tab(app, labels)
+        let deadline = Date().addingTimeInterval(timeout)
+        while !button.exists && Date() < deadline {
+            usleep(500_000)
+            button = tab(app, labels)
+        }
+        guard button.exists else {
+            XCTFail("the \(labels.joined(separator: "/")) tab never appeared", file: file, line: line)
+            return button
+        }
+        button.tap()
+        if !wait(for: "isSelected == true", on: button, timeout: 3) {
+            button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.05)
+        }
+        return button
+    }
+
+    /// The button labelled with any of these (English, then German).
+    static func button(_ app: XCUIApplication, _ labels: String...) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "label IN %@ OR identifier IN %@", labels, labels)).firstMatch
+    }
+
+    /// Scrolls until the element can take a tap: large text pushes controls below
+    /// the fold, a floating tab bar or footer covers the last row, and a lazy list
+    /// has not built a row that is off screen yet. Swipes up first, then back down
+    /// past where it started. Returns whether the element can now be tapped.
+    @discardableResult
+    static func reveal(_ element: XCUIElement, in app: XCUIApplication, swipes: Int = 8) -> Bool {
+        if Layout.tappable(app, element) { return true }
+        for (direction, count) in [(Direction.up, swipes), (.down, swipes * 2)] {
+            for _ in 0..<count {
+                swipe(app, direction)
+                usleep(400_000)  // the scroll decelerates before hit testing is true again
+                if Layout.tappable(app, element) { return true }
+            }
+        }
+        return false
+    }
+
+    /// Taps an element once a user could: waits for it, scrolls it clear when it is
+    /// off screen or covered, then waits until it is hittable. Fails the journey
+    /// with `what` when it never gets there.
+    static func tap(_ element: XCUIElement, in app: XCUIApplication, _ what: String = "", timeout: TimeInterval = 20,
+                    file: StaticString = #filePath, line: UInt = #line) {
+        let name = what.isEmpty ? "\(element)" : what
+        // A lazy list only builds rows near the screen, so a missing element may need a scroll to exist.
+        if !element.waitForExistence(timeout: min(timeout, 3)) { reveal(element, in: app) }
+        guard element.waitForExistence(timeout: timeout) else {
+            XCTFail("\(name) never appeared", file: file, line: line)
+            return
+        }
+        reveal(element, in: app)
+        let deadline = Date().addingTimeInterval(timeout)
+        while !Layout.tappable(app, element) && Date() < deadline { usleep(250_000) }
+        guard Layout.tappable(app, element) else {
+            XCTFail("\(name) is there but a tap cannot reach it (off screen or covered)", file: file, line: line)
+            return
+        }
+        element.tap()
+    }
+
+    /// Puts exactly `text` in a field or text view: taps it (scrolling it clear
+    /// first), waits for keyboard focus, deletes what was there, types, and checks
+    /// the field reads back `text`, clearing and typing once more if it does not.
+    /// Pass `verify: false` for a field that formats what it shows.
+    static func type(_ text: String, into field: XCUIElement, in app: XCUIApplication, replacing: Bool = true,
+                     verify: Bool = true, file: StaticString = #filePath, line: UInt = #line) {
+        tap(field, in: app, "the text field", file: file, line: line)
+        guard focus(field) else {
+            XCTFail("tapping \(field) never gave it keyboard focus", file: file, line: line)
+            return
+        }
+        let checks = verify && field.elementType != .secureTextField
+        for attempt in 0..<2 {
+            if replacing || attempt > 0 { clear(field) }
+            field.typeText(text)
+            guard checks else { return }
+            if reads(field) == text { return }
+        }
+        XCTAssertEqual(reads(field), text, "\(field) does not read back what was typed", file: file, line: line)
+    }
+
+    /// The field's text, ignoring a placeholder and the whitespace a text view adds.
+    static func reads(_ field: XCUIElement) -> String {
+        let value = (field.value as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return value == field.placeholderValue ? "" : value
+    }
+
+    private static func focus(_ field: XCUIElement) -> Bool {
+        if wait(for: "hasKeyboardFocus == true", on: field, timeout: 3) { return true }
+        // At large text the first tap can land while the field is still scrolling into place.
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        return wait(for: "hasKeyboardFocus == true", on: field, timeout: 10)
+    }
+
+    /// Parks the caret after the last character (the bottom-right corner of the
+    /// field, which in a text view is below the last line) and deletes back past it.
+    private static func clear(_ field: XCUIElement) {
+        for _ in 0..<3 {
+            let current = reads(field)
+            if current.isEmpty { return }
+            let corner = field.elementType == .textView ? CGVector(dx: 0.98, dy: 0.95) : CGVector(dx: 0.99, dy: 0.5)
+            field.coordinate(withNormalizedOffset: corner).tap()
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count + 2))
+        }
+    }
+
+    private static func wait(for predicate: String, on element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: predicate), object: element)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+}
