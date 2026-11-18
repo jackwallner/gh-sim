@@ -93,6 +93,6 @@ final class FleetQAControlUITests: XCTestCase {
         QA.tap(QA.button(app, "Save", "Sichern"), in: app, "Save")
         QA.openTab(app, "Today", "Heute")
         XCTAssertTrue(app.staticTexts["Saved QA Tester"].waitForExistence(timeout: 10),
-                      "Save did not reach Today; QA.tap or QA.openTab missed")
+                      "Save did not reach Today: \(app.staticTexts.allElementsBoundByIndex.map(\.label))")
     }
 }

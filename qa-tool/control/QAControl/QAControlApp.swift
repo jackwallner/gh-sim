@@ -207,8 +207,10 @@ struct SettingsList: View {
     var body: some View {
         List {
             ForEach(1...40, id: \.self) { Text("Setting \($0)") }
-            TextField("Name", text: $name).accessibilityIdentifier("settings.name")
+            // Autocorrect rewrites a name on Return ("Tester" became "Teste"), so a name field turns it off.
+            TextField("Name", text: $name).autocorrectionDisabled().accessibilityIdentifier("settings.name")
             Button("Save") { saved = name }
         }
+        .navigationTitle("Settings \(name)")  // DEBUG
     }
 }

@@ -1108,15 +1108,27 @@ extension QA {
         if inBar.exists { return inBar }
         let kinds = NSPredicate(format: "elementType IN %@", [XCUIElement.ElementType.button.rawValue,
                                                                XCUIElement.ElementType.cell.rawValue])
-        return app.descendants(matching: .any)
-            .matching(NSCompoundPredicate(andPredicateWithSubpredicates: [kinds, named])).firstMatch
+        let query = app.descendants(matching: .any)
+            .matching(NSCompoundPredicate(andPredicateWithSubpredicates: [kinds, named]))
+        // The iPad's floating bar keeps a wide hidden twin of some tabs ahead of the
+        // real item (Elder Hub, Nov 2026), so the first match a tap can reach wins.
+        let matches = query.allElementsBoundByIndex
+        if matches.count > 1, let reachable = matches.first(where: { Layout.tappable(app, $0) }) { return reachable }
+        return query.firstMatch
     }
 
     /// Opens a tab and returns it. Waits for the tab, taps it, and if it does not
-    /// read as selected presses its centre (a tap can miss the unfolded Duo's capsule).
-    /// The journey still asserts the screen it expects next.
+    /// read as selected presses its centre (a tap can miss the unfolded Duo's capsule
+    /// and the iPad's top bar). Every tab's title can be in the tree while another tab
+    /// shows, so the journey asserts something only the opened tab draws.
     @discardableResult
     static func openTab(_ app: XCUIApplication, _ labels: String..., timeout: TimeInterval = 20,
+                        file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        openTab(app, labels, timeout: timeout, file: file, line: line)
+    }
+
+    @discardableResult
+    static func openTab(_ app: XCUIApplication, _ labels: [String], timeout: TimeInterval = 20,
                         file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
         var button = tab(app, labels)
         let deadline = Date().addingTimeInterval(timeout)
@@ -1128,11 +1140,25 @@ extension QA {
             XCTFail("the \(labels.joined(separator: "/")) tab never appeared", file: file, line: line)
             return button
         }
-        button.tap()
-        if !wait(for: "isSelected == true", on: button, timeout: 3) {
-            button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.05)
+        // The keyboard covers the tab bar; a user finishes typing first.
+        if app.keyboards.firstMatch.exists, !Layout.tappable(app, button) { endEditing(app) }
+        for attempt in 0..<3 {
+            if attempt == 0 { button.tap() } else {
+                button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.05)
+            }
+            if wait(for: "isSelected == true", on: button, timeout: 3) { break }
+            button = tab(app, labels)
         }
         return button
+    }
+
+    /// Puts the keyboard away the way a user would: Return in a one-line field. A text
+    /// view takes Return as a new line, so it is left as it is.
+    static func endEditing(_ app: XCUIApplication) {
+        let focused = app.descendants(matching: .any).matching(NSPredicate(format: "hasKeyboardFocus == true")).firstMatch
+        guard focused.exists, focused.elementType != .textView else { return }
+        focused.typeText("\n")
+        _ = app.keyboards.firstMatch.waitForNonExistence(timeout: 3)
     }
 
     /// The button labelled with any of these (English, then German).
@@ -1147,14 +1173,50 @@ extension QA {
     @discardableResult
     static func reveal(_ element: XCUIElement, in app: XCUIApplication, swipes: Int = 8) -> Bool {
         if Layout.tappable(app, element) { return true }
+        let surface = scroller(for: element, in: app)
         for (direction, count) in [(Direction.up, swipes), (.down, swipes * 2)] {
             for _ in 0..<count {
-                swipe(app, direction)
+                let before = element.exists ? element.frame : nil
+                drag(surface, direction, in: app)
                 usleep(400_000)  // the scroll decelerates before hit testing is true again
                 if Layout.tappable(app, element) { return true }
+                // The list is at its end this way: the element did not move.
+                if let before, element.exists, element.frame == before { break }
             }
         }
         return false
+    }
+
+    /// A vertical drag across the part of `surface` the keyboard leaves showing: a
+    /// drag that starts on the keyboard scrolls nothing. Normalized to the surface, as
+    /// `swipe` is, so it lands right on the unfolded Duo too.
+    static func drag(_ surface: XCUIElement, _ direction: Direction, in app: XCUIApplication) {
+        var low: CGFloat = 0.8
+        let keyboard = app.keyboards.firstMatch
+        let frame = surface.frame
+        if keyboard.exists, frame.height > 0, keyboard.frame.minY < frame.maxY {
+            low = max(0.3, min(0.8, (keyboard.frame.minY - frame.minY) / frame.height - 0.05))
+        }
+        let high = max(0.05, low - 0.5)
+        let (from, to) = direction == .down ? (high, low) : (low, high)
+        surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: from))
+            .press(forDuration: 0.05, thenDragTo: surface.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: to)),
+                   withVelocity: .fast, thenHoldForDuration: 0)
+    }
+
+    /// What to drag to scroll toward an element: the tall scroll view, list or
+    /// collection under it, latest in the tree. A form sheet on the iPad is shorter
+    /// than the screen, so a drag across the app starts below it (Keyring), and on
+    /// the unfolded Duo each pane scrolls on its own (Baby Docs). A short carousel
+    /// inside a list is not it. Falls back to the whole app.
+    static func scroller(for element: XCUIElement, in app: XCUIApplication) -> XCUIElement {
+        let types = [XCUIElement.ElementType.scrollView, .collectionView, .table].map(\.rawValue)
+        let tall = app.frame.height * 0.4
+        let candidates = app.descendants(matching: .any).matching(NSPredicate(format: "elementType IN %@", types))
+            .allElementsBoundByIndex.filter { $0.exists && $0.frame.height >= tall && app.frame.intersects($0.frame) }
+        let x = element.exists ? element.frame.midX : nil
+        let under = candidates.filter { pane in x.map { pane.frame.minX <= $0 && $0 <= pane.frame.maxX } ?? true }
+        return under.last ?? candidates.last ?? app
     }
 
     /// Taps an element once a user could: waits for it, scrolls it clear when it is
@@ -1169,14 +1231,36 @@ extension QA {
             XCTFail("\(name) never appeared", file: file, line: line)
             return
         }
+        // A user finishes typing before reaching for a control the keyboard covers.
+        if app.keyboards.firstMatch.exists, !Layout.tappable(app, element) { endEditing(app) }
         reveal(element, in: app)
         let deadline = Date().addingTimeInterval(timeout)
-        while !Layout.tappable(app, element) && Date() < deadline { usleep(250_000) }
+        while !Layout.tappable(app, element) && Date() < deadline {
+            // The last row of a list can sit half under the keyboard with no scroll left to
+            // bring it up; a user taps the half that shows.
+            if let part = showing(element, in: app) {
+                element.coordinate(withNormalizedOffset: part).tap()
+                return
+            }
+            usleep(250_000)
+        }
         guard Layout.tappable(app, element) else {
             XCTFail("\(name) is there but a tap cannot reach it (off screen or covered)", file: file, line: line)
             return
         }
         element.tap()
+    }
+
+    /// The centre of the part of an element the keyboard leaves showing, normalized to
+    /// the element, when at least 12 points of it show above the keyboard.
+    static func showing(_ element: XCUIElement, in app: XCUIApplication) -> CGVector? {
+        let keyboard = app.keyboards.firstMatch
+        guard element.exists, keyboard.exists else { return nil }
+        let frame = element.frame
+        let shown = frame.intersection(app.frame).intersection(
+            CGRect(x: app.frame.minX, y: app.frame.minY, width: app.frame.width, height: keyboard.frame.minY - app.frame.minY))
+        guard !shown.isNull, shown.height >= 12, frame.height > 0, frame.width > 0 else { return nil }
+        return CGVector(dx: (shown.midX - frame.minX) / frame.width, dy: (shown.midY - frame.minY) / frame.height)
     }
 
     /// Puts exactly `text` in a field or text view: taps it (scrolling it clear
