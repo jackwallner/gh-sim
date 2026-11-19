@@ -1019,7 +1019,6 @@ enum Paywall {
     /// is not enough: a Settings tab keeps its Restore row in the tree behind
     /// every other tab.
     static func looksLike(_ app: XCUIApplication, name: String, leaves: [Leaf]) -> Bool {
-        let restore = find(app, "restore")?.isHittable ?? false
         let priced = leaves.contains { leaf in
             leaf.label.range(of: price, options: .regularExpression) != nil
                 && leaf.label.range(of: period, options: [.regularExpression, .caseInsensitive]) != nil
@@ -1030,7 +1029,11 @@ enum Paywall {
         }
         let saysSo = name.range(of: named, options: [.regularExpression, .caseInsensitive]) != nil
             && name.range(of: after, options: [.regularExpression, .caseInsensitive]) == nil
-        return (saysSo && (restore || priced || pitch)) || (priced && restore)
+        if saysSo && (priced || pitch) { return true }
+        // Asked only when it decides the answer: the whole-tree query for Restore timed out
+        // on a loaded runner at Keyring's log-service checkpoint, which is no paywall at all.
+        guard saysSo || priced else { return false }
+        return find(app, "restore")?.isHittable ?? false
     }
 
     /// The words each paywall control goes by in the persona languages
@@ -1116,15 +1119,14 @@ extension QA {
         let named = NSPredicate(format: "label IN %@ OR identifier IN %@", labels, labels)
         let inBar = app.tabBars.buttons.matching(named).firstMatch
         if inBar.exists { return inBar }
-        let kinds = NSPredicate(format: "elementType IN %@", [XCUIElement.ElementType.button.rawValue,
-                                                               XCUIElement.ElementType.cell.rawValue])
-        let query = app.descendants(matching: .any)
-            .matching(NSCompoundPredicate(andPredicateWithSubpredicates: [kinds, named]))
+        // Buttons, then cells (a sidebar row), each its own typed query: one over every
+        // element timed out on the unfolded Duo's tree (Quit Zyn, Nov 2026).
+        let queries = [app.buttons.matching(named), app.cells.matching(named)]
         // The iPad's floating bar keeps a wide hidden twin of some tabs ahead of the
         // real item (Elder Hub, Nov 2026), so the first match a tap can reach wins.
-        let matches = query.allElementsBoundByIndex
+        let matches = queries.flatMap(\.allElementsBoundByIndex)
         if matches.count > 1, let reachable = matches.first(where: { Layout.tappable(app, $0) }) { return reachable }
-        return query.firstMatch
+        return queries.first { $0.firstMatch.exists }?.firstMatch ?? queries[0].firstMatch
     }
 
     /// Opens a tab and returns it. Waits for the tab, taps it, and if it does not
@@ -1165,10 +1167,17 @@ extension QA {
     /// Puts the keyboard away the way a user would: Return in a one-line field. A text
     /// view takes Return as a new line, so it is left as it is.
     static func endEditing(_ app: XCUIApplication) {
-        let focused = app.descendants(matching: .any).matching(NSPredicate(format: "hasKeyboardFocus == true")).firstMatch
-        guard focused.exists, focused.elementType != .textView else { return }
+        guard let focused = focusedField(app), focused.elementType != .textView else { return }
         focused.typeText("\n")
         _ = app.keyboards.firstMatch.waitForNonExistence(timeout: 3)
+    }
+
+    /// The field with the keyboard. Asked kind by kind: one query over every element
+    /// timed out on the unfolded Duo's tree (Quit Zyn, Nov 2026).
+    static func focusedField(_ app: XCUIApplication) -> XCUIElement? {
+        let focus = NSPredicate(format: "hasKeyboardFocus == true")
+        return [app.textFields, app.textViews, app.secureTextFields, app.searchFields]
+            .lazy.map { $0.matching(focus).firstMatch }.first { $0.exists }
     }
 
     /// The button labelled with any of these (English, then German).
@@ -1288,7 +1297,8 @@ extension QA {
         let checks = verify && field.elementType != .secureTextField
         // From here on, the field with the keyboard: a field found by its prompt stops
         // matching once the first character replaces the prompt (Quit Zyn's note, Nov 2026).
-        let focused = app.descendants(matching: .any).matching(NSPredicate(format: "hasKeyboardFocus == true")).firstMatch
+        let focused = app.descendants(matching: field.elementType)
+            .matching(NSPredicate(format: "hasKeyboardFocus == true")).firstMatch
         for attempt in 0..<2 {
             if replacing || attempt > 0 { clear(focused) }
             // One keystroke at a time: typed as one string, SwiftUI's binding often missed the
