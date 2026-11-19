@@ -1932,6 +1932,11 @@ def update_backlog(repo: Path, receipt: dict, decision: dict) -> list[dict]:
     sha = receipt["sha"][:12] + ("+dirty" if receipt.get("dirty") else "")
     day = receipt.get("created", now_iso())[:10]
     covered = covered_journeys(receipt.get("tests", []))
+    # A carried German draws newcomer's screens with the same strings it last passed with, so newcomer
+    # covering a journey covers German there too. Without this a German-tagged row never closed unless
+    # German was forced (--german), which the strings-only rule (Jack, Nov 18 2026) is meant to avoid.
+    if GERMAN in (receipt.get("carried") or {}):
+        covered |= {(GERMAN, name) for persona, name in list(covered) if persona == "newcomer"}
     test_names = {t["name"] for t in receipt.get("tests", [])}
     current: dict[str, dict] = {}
     for item in decision["backlog"]:
