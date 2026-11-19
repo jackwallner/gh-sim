@@ -36,7 +36,21 @@ enum QA {
             app.launchEnvironment[key] = value
         }
         rotate()
+        clearSystemAlerts()
         system("launch", journey: journey) { app.launch() }
+    }
+
+    /// Answers a system alert the previous journey's app left on screen (the
+    /// notification ask), so the next launch is not measured dimmed under it (Quit Zyn's
+    /// German welcome, Nov 2026). The first button is the decline: Don't Allow.
+    static func clearSystemAlerts() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for _ in 0..<3 {
+            let alert = springboard.alerts.firstMatch
+            guard alert.exists, alert.buttons.firstMatch.exists else { return }
+            alert.buttons.firstMatch.tap()
+            _ = alert.waitForNonExistence(timeout: 3)
+        }
     }
 
     /// Turns the device to the persona's orientation (the iPad personas). Done
@@ -1303,7 +1317,9 @@ extension QA {
             if replacing || attempt > 0 { clear(focused) }
             // One keystroke at a time: typed as one string, SwiftUI's binding often missed the
             // last character while the field drew it, so Save stored "QA Teste" (iOS 27, Nov 2026).
-            for character in text { focused.typeText(String(character)) }
+            // Sent to the app, which types into whatever holds the keyboard: a lookup per
+            // keystroke timed out on the unfolded Duo's tree on a loaded runner.
+            for character in text { app.typeText(String(character)) }
             guard checks else { return }
             if reads(focused) == text { return }
         }
