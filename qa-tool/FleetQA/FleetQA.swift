@@ -547,8 +547,10 @@ enum Layout {
         guard element.exists else { return false }
         // A main button that overhangs the screen is still the main button: ask it plainly.
         guard tolerant else { return element.isHittable }
-        let frame = element.frame
-        guard !frame.isEmpty, app.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return false }
+        // No check against app.frame: the unfolded Duo reports the outer screen's frame
+        // there, so a button plainly on the inner screen fell outside it (Quit Zyn, Nov 2026).
+        // isHittable already says no for an element scrolled off screen.
+        guard !element.frame.isEmpty else { return false }
         // A hidden tab's chip can sit mid-frame yet have no activation point; the
         // answer is then "no", not a failed test.
         var hittable = false
@@ -1284,15 +1286,18 @@ extension QA {
             return
         }
         let checks = verify && field.elementType != .secureTextField
+        // From here on, the field with the keyboard: a field found by its prompt stops
+        // matching once the first character replaces the prompt (Quit Zyn's note, Nov 2026).
+        let focused = app.descendants(matching: .any).matching(NSPredicate(format: "hasKeyboardFocus == true")).firstMatch
         for attempt in 0..<2 {
-            if replacing || attempt > 0 { clear(field) }
+            if replacing || attempt > 0 { clear(focused) }
             // One keystroke at a time: typed as one string, SwiftUI's binding often missed the
             // last character while the field drew it, so Save stored "QA Teste" (iOS 27, Nov 2026).
-            for character in text { field.typeText(String(character)) }
+            for character in text { focused.typeText(String(character)) }
             guard checks else { return }
-            if reads(field) == text { return }
+            if reads(focused) == text { return }
         }
-        XCTAssertEqual(reads(field), text, "\(field) does not read back what was typed", file: file, line: line)
+        XCTAssertEqual(reads(focused), text, "\(field) does not read back what was typed", file: file, line: line)
     }
 
     /// The field's text, ignoring a placeholder and the whitespace a text view adds.

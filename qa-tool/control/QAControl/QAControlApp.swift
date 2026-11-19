@@ -203,12 +203,13 @@ struct Tabs: View {
 
 struct SettingsList: View {
     @Binding var saved: String
-    @State private var name = "Jack"
+    @State private var name = ""
 
     var body: some View {
         List {
             ForEach(1...40, id: \.self) { Text("Setting \($0)") }
-            TextField("Name", text: $name).accessibilityIdentifier("settings.name")
+            // Found by its prompt alone, which stops matching once typing starts (Quit Zyn's note).
+            TextField("", text: $name, prompt: Text("Your name"))
             Button("Save") { saved = name }
         }
     }

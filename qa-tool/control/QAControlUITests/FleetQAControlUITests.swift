@@ -87,9 +87,8 @@ final class FleetQAControlUITests: XCTestCase {
         QA.launch(app, environment: ["QA_CONTROL_SCREEN": "tabs"])
         XCTAssertTrue(app.staticTexts["Nothing saved"].waitForExistence(timeout: 20))
         QA.openTab(app, "Settings", "Einstellungen")
-        let field = app.textFields["settings.name"]
+        let field = app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "Your name")).firstMatch
         QA.type("QA Tester", into: field, in: app)
-        XCTAssertEqual(QA.reads(field), "QA Tester")
         QA.tap(QA.button(app, "Save", "Sichern"), in: app, "Save")
         QA.openTab(app, "Today", "Heute")
         XCTAssertTrue(app.staticTexts["Saved QA Tester"].waitForExistence(timeout: 10),
