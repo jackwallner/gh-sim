@@ -1486,8 +1486,12 @@ def upgrade_in(source: Path, config: dict, sim: "Sim", folder: Path, log: Path, 
     # A live version from before the gate has no journeys to seed with: build just the app and launch it once.
     scheme = old["scheme"] if gated else config["scheme"].removesuffix("UITests")
     project = ["-project", old["project"], "-scheme", scheme, "-derivedDataPath", str(derived)]
+    # gate.json "upgrade_build_settings": placeholders an old project.yml demands on simulator builds (StatScout's
+    # live 1.5.6 refuses to build without SUPABASE_URL). Never real secrets: GitHub gate logs are public.
+    placeholders = [f"{k}={v}" for k, v in config.get("upgrade_build_settings", {}).items()]
     built = sh(["xcodebuild", *project, "-destination", "generic/platform=iOS Simulator",
-                "build-for-testing" if gated else "build", "-quiet", "ARCHS=arm64"], cwd=source, check=False, log=log)
+                "build-for-testing" if gated else "build", "-quiet", "ARCHS=arm64", *placeholders],
+               cwd=source, check=False, log=log)
     old_app = app_product(derived, bundle_id)
     if built.returncode or not old_app:
         return {**result, "unchecked": "the live version did not build"}
