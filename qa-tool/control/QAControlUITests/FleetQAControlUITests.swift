@@ -108,4 +108,20 @@ final class FleetQAControlUITests: XCTestCase {
         let under = overlaps.filter { $0.contains("Continue") || $0.contains("\"Home\"") || $0.contains("\"More\"") }
         XCTAssertTrue(under.isEmpty, "rows under a pinned bar flagged: \(under)")
     }
+
+    /// Offscreen inside scroll views: a rack a vertical scroll view clips is P1, a carousel ending partway through a
+    /// card is never reported, and a strip that could be either is P2.
+    func testScrollViewClipping() {
+        let app = XCUIApplication()
+        QA.launch(app, environment: ["QA_CONTROL_SCREEN": "scrollclip"])
+        XCTAssertTrue(app.staticTexts["Your rack"].waitForExistence(timeout: 20))
+        QA.checkpoint(app, "scrollclip")
+        let offscreen = QA.lastFindings.filter { $0.oracle == "offscreen" }
+        let rack = offscreen.filter { $0.detail.contains("\"Tile ") }
+        XCTAssertFalse(rack.isEmpty, "clipped rack not caught: \(offscreen.map(\.detail))")
+        XCTAssertTrue(rack.allSatisfy { $0.severity == "P1" }, "clipped rack not P1: \(rack.map(\.severity))")
+        XCTAssertFalse(offscreen.contains { $0.detail.contains("\"Card ") }, "carousel flagged: \(offscreen.map(\.detail))")
+        let strip = offscreen.filter { $0.detail.contains("\"Strip ") }
+        XCTAssertTrue(!strip.isEmpty && strip.allSatisfy { $0.severity == "P2" }, "unclear strip not P2: \(strip)")
+    }
 }

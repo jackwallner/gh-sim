@@ -14,6 +14,7 @@ struct QAControlApp: App {
             case "tabs": Tabs()
             case "motion": MotionPlant()
             case "underbars": UnderBars()
+            case "scrollclip": ScrollClip()
             default: Flow(broken: false)
             }
         }
@@ -264,6 +265,52 @@ struct UnderBars: View {
             .buttonStyle(.plain)
             .frame(height: 2 * pitch)
             .offset(y: 4 * pitch + 30)
+        }
+    }
+}
+
+/// The offscreen oracle inside scroll views: a rack centred and 30% wider than the screen in a scroll view that
+/// scrolls vertically (cut on both sides, never reachable), a carousel that ends partway through a card (fine),
+/// and a short horizontal strip only 10% wider than the screen (cannot be told from a clipping scroll view).
+struct ScrollClip: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            ScrollView {
+                VStack(spacing: 24) {
+                    Text("Your rack").font(.title.bold())
+                    HStack(spacing: 6) {
+                        ForEach(0..<Int(width * 1.3 / 50) + 1, id: \.self) { index in
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.green.opacity(0.3))
+                                .frame(width: 44, height: 58)
+                                .accessibilityElement()
+                                .accessibilityLabel("Tile \(index + 1)")
+                                .accessibilityAddTraits(.isImage)
+                        }
+                    }
+                    .fixedSize()
+                    .frame(width: width - 32)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 12) {
+                            ForEach(1...12, id: \.self) { index in
+                                Text("Card \(index)")
+                                    .frame(width: 150, height: 90)
+                                    .background(Color.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 0) {
+                            ForEach(1...2, id: \.self) { index in
+                                Text("Strip \(index)").frame(width: width * 0.55, height: 44)
+                            }
+                        }
+                    }
+                    ForEach(1...30, id: \.self) { Text("Line \($0)") }
+                }
+            }
         }
     }
 }

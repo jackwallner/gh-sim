@@ -91,6 +91,11 @@ PERSONAS: dict[str, dict] = {
                "launch_arguments": ["-AppleLanguages", "(de)", "-AppleLocale", "de_DE"], "needs_locale": "de"},
     "duo": {"about": "iPhone Duo unfolded, the two-pane layouts", "appearance": "light", "content_size": "large",
             "contrast": False, "reduce_motion": False, "device": "duo", "video": False},
+    # The narrowest iPhone iOS 27 runs (375pt). Every other phone persona is 390pt or wider, so rows of fixed-width
+    # tiles or cards that overflowed a 375pt or Display Zoom phone shipped (Mahj 1-star review, Nov 21 2026).
+    "narrow": {"about": "iPhone SE (3rd generation), 375x667pt, rows that overflow a narrow phone",
+               "appearance": "light", "content_size": "large", "contrast": False, "reduce_motion": False,
+               "device": "narrow", "video": False},
     # iPad Pro 13-inch (agent-sim slot 13), both orientations, for apps that target iPad. Only ever
     # added for such apps (see ipad_personas); an iPhone-only app never runs them.
     "ipad-portrait": {"about": "iPad Pro 13-inch, portrait", "appearance": "light", "content_size": "large",
@@ -101,13 +106,16 @@ PERSONAS: dict[str, dict] = {
                        "video": False},
 }
 # Personas every app runs whether or not its gate.json lists them (a third of
-# Oct 2026's app changes were Duo layouts nothing exercised). "skip": [...] in
-# gate.json opts an app out.
-ALWAYS_PERSONAS = ["duo"]
+# Oct 2026's app changes were Duo layouts nothing exercised; nothing ran below
+# 390pt until narrow, Nov 22 2026). "skip": [...] in gate.json opts an app out.
+ALWAYS_PERSONAS = ["duo", "narrow"]
 DUO_SLOT = 11
 DUO_SLOTS = (11, 12)
 IPAD_SLOT = 13
 IPAD_PERSONAS = ["ipad-portrait", "ipad-landscape"]
+# The pool has no iPhone SE: the narrow persona creates a throwaway one, boots it through the capacity gate
+# (the xcrun shim), and deletes it after. A GitHub runner creates it the same way.
+NARROW_DEVICE = "iPhone SE (3rd generation)"
 SLOT_WAIT = 4 * 3600  # seconds to wait for a named slot another run holds (one iPad Pro serves every local gate)
 
 # German guards long strings and comma decimals. In the 22 German runs from Oct 28 to Nov 18 2026 it found 3
@@ -420,10 +428,35 @@ def decide(findings: list[dict], tests: list[dict], ledger: list[dict], stale: b
 # ---------------------------------------------------------------- simulator
 
 class Sim:
-    def __init__(self, owner: str, slot: int | None, log: Path):
+    def __init__(self, owner: str, slot: int | None, log: Path, device_type: str | None = None):
         self.owner, self.slot, self.log, self.udid = owner, slot, log, ""
+        self.device_type = device_type  # a throwaway device of this type instead of a pool lease
+
+    def throwaways(self) -> list[str]:
+        devices = json.loads(sh(["xcrun", "simctl", "list", "devices", "-j"]).stdout or "{}").get("devices", {})
+        return [d["udid"] for group in devices.values() for d in group if d.get("name") == self.owner]
+
+    def discard(self) -> None:
+        for udid in self.throwaways():
+            sh(["xcrun", "simctl", "shutdown", udid], check=False, log=self.log, timeout=SIM_CALL_SECONDS)
+            sh(["xcrun", "simctl", "delete", udid], check=False, log=self.log, timeout=SIM_CALL_SECONDS)
+
+    def create(self) -> None:
+        self.discard()  # left by a run that was killed
+        runtimes = json.loads(sh(["xcrun", "simctl", "list", "runtimes", "-j"]).stdout).get("runtimes", [])
+        fits = [r["identifier"] for r in runtimes if r.get("platform") == "iOS" and r.get("isAvailable")
+                and any(t.get("name") == self.device_type for t in r.get("supportedDeviceTypes", []))]
+        if not fits:
+            raise SystemExit(f"qa-gate: no iOS runtime here runs {self.device_type}")
+        self.udid = sh(["xcrun", "simctl", "create", self.owner, self.device_type, fits[-1]],
+                       timeout=SIM_CALL_SECONDS).stdout.strip()
+        say(f"created a throwaway {self.device_type} ({fits[-1].rsplit('.', 1)[-1]})")
 
     def __enter__(self) -> "Sim":
+        if self.device_type:
+            self.create()
+            self.boot()
+            return self
         held = sh(["agent-sim", "udid", self.owner], check=False).stdout.strip()
         if not held:
             say(f"leasing a simulator ({self.owner}); waits for pool capacity")
@@ -449,6 +482,12 @@ class Sim:
         self.boot()
 
     def boot(self) -> None:
+        if self.device_type:
+            # The xcrun shim sends both through agent-sim gate-boot, which waits for room under the pool's limit.
+            sh(["xcrun", "simctl", "boot", self.udid], check=False, log=self.log, timeout=SLOT_WAIT)
+            sh(["xcrun", "simctl", "bootstatus", self.udid, "-b"], log=self.log, timeout=SLOT_WAIT)
+            say(f"simulator {self.udid}")
+            return
         sh(["agent-sim", "boot", self.owner], log=self.log)
         self.udid = sh(["agent-sim", "udid", self.owner]).stdout.strip()
         say(f"simulator {self.udid}")
@@ -459,6 +498,9 @@ class Sim:
             time.sleep(3)
 
     def __exit__(self, *exc) -> None:
+        if self.device_type:
+            self.discard()
+            return
         self.configure(PERSONAS["newcomer"])
         if self.slot == DUO_SLOT:
             sh(["duo-hinge", "-d", self.udid, "closed"], check=False, log=self.log, timeout=SIM_CALL_SECONDS)
@@ -1049,7 +1091,7 @@ def cmd_install(args) -> int:
 
 
 # GitHub gates run as three parallel jobs (gate.yml matrix); qa-gate merges their partial runs.
-# a: unit tests and the default phone personas; b: Reduce Motion, German, upgrade; c: Duo and iPad.
+# a: unit tests, the default phone personas and narrow; b: Reduce Motion, German, upgrade, Duo; c: iPad.
 SHARD_OF = {"reduce-motion": "b", "german": "b"}
 SHARDS = ("a", "b", "c")
 # Not a shard of the gate: the personas a fix round rechecks on one GitHub Mac, with no unit or upgrade check.
@@ -1058,6 +1100,7 @@ RECHECK = "recheck"
 
 def shard_of(persona: str) -> str:
     # The two iPad orientations fill shard c; duo joins b, which ran 28 to 58 minutes to c's 42 to 86 (Nov 14).
+    # narrow stays in a, the lightest: journey minutes averaged a 19, b 21, c 25 over Nov 19 to 23's 16 gates.
     device = PERSONAS[persona].get("device")
     if device == "ipad":
         return "c"
@@ -1376,7 +1419,8 @@ def run_here(args, host: str | None = None) -> int:
             if summary:
                 motion[name] = summary
 
-    phone = [p for p in personas if PERSONAS[p].get("device") not in ("duo", "ipad")]
+    phone = [p for p in personas if PERSONAS[p].get("device") not in ("duo", "ipad", "narrow")]
+    narrow = [p for p in personas if PERSONAS[p].get("device") == "narrow"]
     duo = [p for p in personas if PERSONAS[p].get("device") == "duo"]
     ipad = [p for p in personas if PERSONAS[p].get("device") == "ipad"]
     if phone or do_unit or do_upgrade:
@@ -1386,6 +1430,9 @@ def run_here(args, host: str | None = None) -> int:
             run_group(sim, phone)
             if do_upgrade and bundle_id:
                 upgrade = run_upgrade(repo, config, sim, out, log, bundle_id)
+    if narrow:
+        with Sim(f"qa-{repo.name}-narrow", None, log, NARROW_DEVICE) as sim:
+            run_group(sim, narrow)
     if duo:
         with Sim(f"qa-{repo.name}-duo", DUO_SLOT, log) as sim:
             run_group(sim, duo)
