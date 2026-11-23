@@ -1454,14 +1454,17 @@ final class FleetQADisplayZoom: XCTestCase {
         guard let wanted = QA.env["QA_DISPLAY_ZOOM_WIDTH"].flatMap(Double.init) else {
             throw XCTSkip("qa-gate sets Display Zoom for the zoomed persona only")
         }
+        continueAfterFailure = false
         let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
         settings.launch()
         let window = settings.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 30), "Settings did not open")
         let width = window.frame.width
         if width <= wanted + 0.5 { return }
+        // iOS 27 keeps Display Zoom under Appearance; iOS 26 (some GitHub runners) under Display & Brightness.
+        let page = settings.staticTexts.matching(NSPredicate(format: "label IN %@", ["Appearance", "Display & Brightness"]))
         let steps: [(String, XCUIElement)] = [
-            ("Appearance", settings.staticTexts["Appearance"].firstMatch),
+            ("Appearance", page.firstMatch),
             ("Display Zoom", settings.staticTexts["Display Zoom"].firstMatch),
             ("Larger Text", settings.otherElements["Zoomed"].firstMatch),
         ]

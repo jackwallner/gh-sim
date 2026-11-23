@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -96,6 +97,11 @@ PERSONAS: dict[str, dict] = {
     "narrow": {"about": "iPhone SE (3rd generation), 375x667pt, rows that overflow a narrow phone",
                "appearance": "light", "content_size": "large", "contrast": False, "reduce_motion": False,
                "device": "narrow", "video": False},
+    # Display Zoom (Larger Text) on a 6.1-inch iPhone lays out at 320x693pt, 55pt narrower than narrow: the phone
+    # behind Mahj's 1-star review (iPhone 15 Pro, zoomed), whose tiles and text clipped where nothing else did.
+    "zoomed": {"about": "iPhone 15 Pro with Display Zoom (Larger Text), 320x693pt",
+               "appearance": "light", "content_size": "large", "contrast": False, "reduce_motion": False,
+               "device": "zoomed", "video": False},
     # iPad Pro 13-inch (agent-sim slot 13), both orientations, for apps that target iPad. Only ever
     # added for such apps (see ipad_personas); an iPhone-only app never runs them.
     "ipad-portrait": {"about": "iPad Pro 13-inch, portrait", "appearance": "light", "content_size": "large",
@@ -107,8 +113,8 @@ PERSONAS: dict[str, dict] = {
 }
 # Personas every app runs whether or not its gate.json lists them (a third of
 # Oct 2026's app changes were Duo layouts nothing exercised; nothing ran below
-# 390pt until narrow, Nov 22 2026). "skip": [...] in gate.json opts an app out.
-ALWAYS_PERSONAS = ["duo", "narrow"]
+# 390pt until narrow, Nov 22 2026, nor at 320pt until zoomed, Nov 23). "skip": [...] in gate.json opts an app out.
+ALWAYS_PERSONAS = ["duo", "narrow", "zoomed"]
 DUO_SLOT = 11
 DUO_SLOTS = (11, 12)
 IPAD_SLOT = 13
@@ -116,6 +122,11 @@ IPAD_PERSONAS = ["ipad-portrait", "ipad-landscape"]
 # The pool has no iPhone SE: the narrow persona creates a throwaway one, boots it through the capacity gate
 # (the xcrun shim), and deletes it after. A GitHub runner creates it the same way.
 NARROW_DEVICE = "iPhone SE (3rd generation)"
+# zoomed is a throwaway too. Display Zoom resets on every boot and no simctl or defaults key sets it, so after each
+# boot FleetQADisplayZoom (in the vendored FleetQA) picks Larger Text in Settings; the device restarts under it.
+ZOOMED_DEVICE = "iPhone 15 Pro"
+ZOOMED_WIDTH = 320
+DISPLAY_ZOOM_FAILED = "Display Zoom did not apply"
 SLOT_WAIT = 4 * 3600  # seconds to wait for a named slot another run holds (one iPad Pro serves every local gate)
 
 # German guards long strings and comma decimals. In the 22 German runs from Oct 28 to Nov 18 2026 it found 3
@@ -160,7 +171,9 @@ RUNNER_DIED = (*RUNNER_LOST, "encountered an error", "Failed to install or launc
                # hang repeats on the regate and goes to the fix agent.
                "Timed out while launching application via Xcode", "via Xcode: Timed out",
                # The relaunch never produced a process, so no app code ran (Sports duo, Nov 17).
-               "does not have a process ID")
+               "does not have a process ID",
+               # Settings never reached Larger Text, so the zoomed persona would only repeat a 393pt phone.
+               DISPLAY_ZOOM_FAILED)
 
 
 # xcodebuild on a wedged simulator never exits (Baby, Nov 4 2026: stuck on the
@@ -428,9 +441,12 @@ def decide(findings: list[dict], tests: list[dict], ledger: list[dict], stale: b
 # ---------------------------------------------------------------- simulator
 
 class Sim:
-    def __init__(self, owner: str, slot: int | None, log: Path, device_type: str | None = None):
+    def __init__(self, owner: str, slot: int | None, log: Path, device_type: str | None = None,
+                 prepare: Callable[[Sim], str | None] | None = None):
         self.owner, self.slot, self.log, self.udid = owner, slot, log, ""
         self.device_type = device_type  # a throwaway device of this type instead of a pool lease
+        # Runs after every boot (reboots included); a returned string says why the device is unfit for its persona.
+        self.prepare, self.unfit = prepare, None
 
     def throwaways(self) -> list[str]:
         devices = json.loads(sh(["xcrun", "simctl", "list", "devices", "-j"]).stdout or "{}").get("devices", {})
@@ -487,6 +503,7 @@ class Sim:
             sh(["xcrun", "simctl", "boot", self.udid], check=False, log=self.log, timeout=SLOT_WAIT)
             sh(["xcrun", "simctl", "bootstatus", self.udid, "-b"], log=self.log, timeout=SLOT_WAIT)
             say(f"simulator {self.udid}")
+            self.unfit = self.prepare(self) if self.prepare else None
             return
         sh(["agent-sim", "boot", self.owner], log=self.log)
         self.udid = sh(["agent-sim", "udid", self.owner]).stdout.strip()
@@ -1091,7 +1108,7 @@ def cmd_install(args) -> int:
 
 
 # GitHub gates run as three parallel jobs (gate.yml matrix); qa-gate merges their partial runs.
-# a: unit tests, the default phone personas and narrow; b: Reduce Motion, German, upgrade, Duo; c: iPad.
+# a: unit tests, the default phone personas and narrow; b: Reduce Motion, German, upgrade, Duo, zoomed; c: iPad.
 SHARD_OF = {"reduce-motion": "b", "german": "b"}
 SHARDS = ("a", "b", "c")
 # Not a shard of the gate: the personas a fix round rechecks on one GitHub Mac, with no unit or upgrade check.
@@ -1101,10 +1118,11 @@ RECHECK = "recheck"
 def shard_of(persona: str) -> str:
     # The two iPad orientations fill shard c; duo joins b, which ran 28 to 58 minutes to c's 42 to 86 (Nov 14).
     # narrow stays in a, the lightest: journey minutes averaged a 19, b 21, c 25 over Nov 19 to 23's 16 gates.
+    # narrow added about 6.5 to a and zoomed about 8 (6.5 plus setting Display Zoom), so zoomed goes to b.
     device = PERSONAS[persona].get("device")
     if device == "ipad":
         return "c"
-    if device == "duo":
+    if device in ("duo", "zoomed"):
         return "b"
     return SHARD_OF.get(persona, "a")
 
@@ -1304,6 +1322,10 @@ def run_here(args, host: str | None = None) -> int:
         subset = reduce_motion_tests(repo, config, timeline.get("newcomer")) if name == REDUCE_MOTION else []
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir()
+        if sim.unfit:
+            say(f"persona {name}: {sim.unfit}")
+            return [{"persona": name, "name": "display zoom", "result": "Failed", "failures": [sim.unfit],
+                     "seconds": None}], [], [], None
         sim.configure(persona)
         if bundle_id:
             sh(["xcrun", "simctl", "uninstall", sim.udid, bundle_id], check=False, log=log, timeout=SIM_CALL_SECONDS)
@@ -1419,8 +1441,29 @@ def run_here(args, host: str | None = None) -> int:
             if summary:
                 motion[name] = summary
 
-    phone = [p for p in personas if PERSONAS[p].get("device") not in ("duo", "ipad", "narrow")]
+    def display_zoom(sim: Sim) -> str | None:
+        """Sets Display Zoom with FleetQADisplayZoom: a run that changes it ends in the restart, the next finds it."""
+        target = config["journeys"][0].split("/")[0]
+        env = {**os.environ, "TEST_RUNNER_QA_DISPLAY_ZOOM_WIDTH": str(ZOOMED_WIDTH)}
+        say(f"setting Display Zoom to Larger Text ({ZOOMED_WIDTH}pt wide)")
+        for attempt in range(3):
+            bundle = out / "zoomed" / f"display-zoom-{attempt}.xcresult"
+            shutil.rmtree(bundle, ignore_errors=True)
+            bundle.parent.mkdir(parents=True, exist_ok=True)
+            sh(["xcodebuild", *project, "-destination", f"id={sim.udid}", "test-without-building",
+                "-resultBundlePath", str(bundle), "-collect-test-diagnostics", "never",
+                f"-only-testing:{target}/FleetQADisplayZoom/testDisplayZoom"],
+               cwd=repo, check=False, env=env, log=log, timeout=900)
+            # A vendored FleetQA without the test runs nothing and passes, so only the test's own pass counts.
+            if any(t["result"] == "Passed" for t in test_results(bundle, "zoomed")):
+                return None
+            sh(["xcrun", "simctl", "bootstatus", sim.udid], check=False, log=log, timeout=300)
+        return (f"{DISPLAY_ZOOM_FAILED}: Settings did not reach Larger Text at {ZOOMED_WIDTH}pt "
+                f"(log {log}; qa-gate install if the vendored FleetQA predates FleetQADisplayZoom)")
+
+    phone = [p for p in personas if not PERSONAS[p].get("device")]
     narrow = [p for p in personas if PERSONAS[p].get("device") == "narrow"]
+    zoomed = [p for p in personas if PERSONAS[p].get("device") == "zoomed"]
     duo = [p for p in personas if PERSONAS[p].get("device") == "duo"]
     ipad = [p for p in personas if PERSONAS[p].get("device") == "ipad"]
     if phone or do_unit or do_upgrade:
@@ -1433,6 +1476,9 @@ def run_here(args, host: str | None = None) -> int:
     if narrow:
         with Sim(f"qa-{repo.name}-narrow", None, log, NARROW_DEVICE) as sim:
             run_group(sim, narrow)
+    if zoomed:
+        with Sim(f"qa-{repo.name}-zoomed", None, log, ZOOMED_DEVICE, prepare=display_zoom) as sim:
+            run_group(sim, zoomed)
     if duo:
         with Sim(f"qa-{repo.name}-duo", DUO_SLOT, log) as sim:
             run_group(sim, duo)
