@@ -1460,7 +1460,13 @@ final class FleetQADisplayZoom: XCTestCase {
         let window = settings.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 30), "Settings did not open")
         let width = window.frame.width
-        if width <= wanted + 0.5 { return }
+        if width <= wanted + 0.5 {
+            // Left in front, Settings puts its back link in the app's status bar, which Apple's element-detection
+            // audit reports as inaccessible text on every early checkpoint (Mahj zoomed onboarding, Nov 23).
+            settings.terminate()
+            XCUIDevice.shared.press(.home)
+            return
+        }
         // iOS 27 keeps Display Zoom under Appearance; iOS 26 (some GitHub runners) under Display & Brightness.
         let page = settings.staticTexts.matching(NSPredicate(format: "label IN %@", ["Appearance", "Display & Brightness"]))
         let steps: [(String, XCUIElement)] = [
