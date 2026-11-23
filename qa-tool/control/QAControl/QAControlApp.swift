@@ -271,7 +271,7 @@ struct UnderBars: View {
 
 /// The offscreen oracle inside scroll views: a rack centred and 30% wider than the screen in a scroll view that
 /// scrolls vertically (cut on both sides, never reachable), a carousel that ends partway through a card (fine),
-/// and a short horizontal strip only 10% wider than the screen (cannot be told from a clipping scroll view).
+/// and a short horizontal strip 40pt wider than the screen (cannot be told from a clipping scroll view).
 struct ScrollClip: View {
     var body: some View {
         GeometryReader { proxy in
@@ -306,12 +306,10 @@ struct ScrollClip: View {
                         .padding(.horizontal, 16)
                     }
                     ScrollView(.horizontal, showsIndicators: false) {
+                        // 40pt wider than the screen on every device: "Strip 2" starts on screen and runs off it.
                         HStack(spacing: 0) {
-                            ForEach(1...2, id: \.self) { index in
-                                Text("Strip \(index)").frame(width: width * 0.55, height: 44)
-                                    .accessibilityElement()
-                                    .accessibilityLabel("Strip \(index)")
-                            }
+                            Text("Strip 1").frame(width: width - 40, height: 44, alignment: .leading)
+                            Text("Strip 2").frame(width: 80, height: 44, alignment: .leading)
                         }
                     }
                     ForEach(1...30, id: \.self) { Text("Line \($0)") }
