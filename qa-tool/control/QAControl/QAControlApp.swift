@@ -297,6 +297,10 @@ struct ScrollClip: View {
                                 Text("Card \(index)")
                                     .frame(width: 150, height: 90)
                                     .background(Color.blue.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                                    // One element over the whole card, as an app's tappable card is: a bare
+                                    // Text reports only its glyphs, which no edge cuts.
+                                    .accessibilityElement()
+                                    .accessibilityLabel("Card \(index)")
                             }
                         }
                         .padding(.horizontal, 16)
@@ -305,6 +309,8 @@ struct ScrollClip: View {
                         HStack(spacing: 0) {
                             ForEach(1...2, id: \.self) { index in
                                 Text("Strip \(index)").frame(width: width * 0.55, height: 44)
+                                    .accessibilityElement()
+                                    .accessibilityLabel("Strip \(index)")
                             }
                         }
                     }
