@@ -1103,6 +1103,7 @@ def merge_shards(repo: Path, out: Path, sha: str, partials: list[dict], reused: 
 LOCAL_LOCK = STATE / "local-gate.lock"
 # Two local gates fit the Air at normal load (agent-sim target 3); four drove load to 286 on Nov 14.
 LOCAL_SLOTS = (LOCAL_LOCK, STATE / "local-gate-2.lock")
+LOCAL_SLOT_POLL_SECONDS = 20
 
 
 _LOCKED: set[Path] = set()
@@ -1147,10 +1148,25 @@ def cmd_run(args) -> int:
         if full and gate_host(repo, overflow=True) == "github":
             say("both local gate slots are busy on this Mac; GitHub has room, gating there")
             return run_here(args, host="github")
-        say("both local gate slots are busy on this Mac; waiting for the first to finish")
-        with LOCAL_LOCK.open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            return run_here(args, host="local")
+        say("both local gate slots are busy on this Mac; waiting for one to free")
+        # Poll both slots. A blocking wait on slot 1 alone never saw slot 2 free, so a
+        # waiter sat for hours while newer gates took slot 2 (Vitals, 2026-11-22).
+        polls = 0
+        while True:
+            time.sleep(LOCAL_SLOT_POLL_SECONDS)
+            polls += 1
+            for slot in LOCAL_SLOTS:
+                lock = slot.open("a")
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    lock.close()
+                    continue
+                with lock:
+                    return run_here(args, host="local")
+            if full and polls % 15 == 0 and gate_host(repo, overflow=True) == "github":
+                say("GitHub has room now, gating there")
+                return run_here(args, host="github")
 
 
 def gate_personas(repo: Path, config: dict, chosen: list[str] | None = None) -> tuple[list[str], list[str]]:
